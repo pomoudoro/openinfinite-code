@@ -1,0 +1,11 @@
+# OpenCode Infinite: extra color themes. One theme per line:
+# name|title|accent|border|selected|rainbow
+# name: a-z 0-9 _ - , 2 to 20 characters, not one of the built-in names (ocean forest sunset mono rainbow)
+# title, accent, border, selected: terminal color codes (digits and ; only), for example 1;96 or 30;46
+# rainbow: 1 = the colors flow like LEDs, 0 = fixed colors
+# A line that does not match is skipped. At most 30 themes are read.
+solar|1;93|33|33|30;43|0
+ice|1;97|37|36|30;47|0
+ember|1;91|91|31|30;41|0
+neon|1;95|96|95|30;106|0
+slate|1;37|37|90|30;47|0

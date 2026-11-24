@@ -1,0 +1,8 @@
+# .bat/.cmd ficam com CRLF no repo: o cmd nao le batch so com LF.
+*.bat -text
+*.cmd -text
+*.ps1 text eol=crlf
+*.sh  text eol=lf
+*.png binary
+*.gif binary
+*.webp binary

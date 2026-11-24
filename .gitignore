@@ -1,0 +1,10 @@
+node_modules/
+claude-bridge/instructions.md
+*.bak
+*.bak-*
+*.backup-*
+*.before-*
+*.log
+.env
+auth.json
+__pycache__/
