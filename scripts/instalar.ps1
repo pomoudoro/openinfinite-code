@@ -26,11 +26,15 @@ function Aviso([string]$t)  { Write-Host "   [!]  $t" -ForegroundColor Yellow }
 function Info([string]$t)   { Write-Host "        $t" }
 function Pergunta([string]$t) {
     if ($Sim) { return $true }
-    while ($true) {
-        $r = Read-Host "   $t [S/N]"
-        if ($r -match '^(s|sim|y|yes)$') { return $true }
-        if ($r -match '^(n|nao|no)$')    { return $false }
+    # Enter = sim. Tres respostas invalidas (ou entrada fechada) = nao, nunca fica preso.
+    for ($i = 0; $i -lt 3; $i++) {
+        $r = Read-Host "   $t [S/n]"
+        if ($null -eq $r) { return $false }
+        $r = $r.Trim()
+        if ($r -eq '' -or $r -match '^(s|sim|y|yes)$') { return $true }
+        if ($r -match '^(n|nao|no)$') { return $false }
     }
+    return $false
 }
 function Atualiza-Path {
     $m = [Environment]::GetEnvironmentVariable('Path', 'Machine')
@@ -80,46 +84,45 @@ if (-not (Test-Path -LiteralPath (Join-Path $Launcher 'OpenCode Infinite.bat')))
 Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue
 
 # ------------------------------------------------------------------ 1. dependencias
+$Faltando = New-Object System.Collections.ArrayList
+function Tem-Python { $v = $null; try { $v = (& python -c "import sqlite3,sys;print(sys.version.split()[0])" 2>$null) } catch {}; return $v }
+function Tem-Node   { $v = $null; try { $v = (& node --version 2>$null) } catch {}; return $v }
+function Tem-Warp   { return (Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'Cloudflare\Cloudflare WARP\warp-cli.exe')) }
+function Tem-Desk   { return (Test-Path -LiteralPath (Join-Path $env:LOCALAPPDATA 'Programs\ai.opencode.desktop')) }
+
 if (-not $SemDependencias) {
     Titulo '1/6  Dependencias'
 
     # Python (o resume-target.py le o banco de sessoes do OpenCode para achar o chat que bateu o limite)
-    $py = $null
-    try { $py = (& python -c "import sqlite3,sys;print(sys.version.split()[0])" 2>$null) } catch {}
-    if ($py) { Ok "Python $py" }
-    else {
+    $py = Tem-Python
+    if (-not $py) {
         Aviso 'Python 3 nao encontrado (precisa estar no PATH como "python").'
-        if (Pergunta 'Instalar Python 3.12 agora?') { [void](Winget-Instala 'Python.Python.3.12' 'Python 3.12') }
-        else { Info 'link: https://www.python.org/downloads/windows/ (marque "Add python.exe to PATH")' }
+        if (Pergunta 'Instalar Python 3.12 agora?') { [void](Winget-Instala 'Python.Python.3.12' 'Python 3.12'); $py = Tem-Python }
     }
+    if ($py) { Ok "Python $py" } else { [void]$Faltando.Add(@('Python 3 (obrigatorio: retomada no mesmo chat)', 'https://www.python.org/downloads/windows/  (marque "Add python.exe to PATH")')) }
 
     # Node.js (CLI do OpenCode via npm e o bridge do Claude Code)
-    $node = $null
-    try { $node = (& node --version 2>$null) } catch {}
-    if ($node) { Ok "Node.js $node" }
-    else {
+    $node = Tem-Node
+    if (-not $node) {
         Aviso 'Node.js nao encontrado.'
-        if (Pergunta 'Instalar Node.js LTS agora?') { [void](Winget-Instala 'OpenJS.NodeJS.LTS' 'Node.js LTS') }
-        else { Info 'link: https://nodejs.org/en/download' }
+        if (Pergunta 'Instalar Node.js LTS agora?') { [void](Winget-Instala 'OpenJS.NodeJS.LTS' 'Node.js LTS'); $node = Tem-Node }
     }
+    if ($node) { Ok "Node.js $node" } else { [void]$Faltando.Add(@('Node.js (recomendado: CLI do OpenCode e bridge)', 'https://nodejs.org/en/download')) }
 
     # Cloudflare WARP (troca de IP)
-    $warp = Join-Path $env:ProgramFiles 'Cloudflare\Cloudflare WARP\warp-cli.exe'
-    if (Test-Path -LiteralPath $warp) { Ok 'Cloudflare WARP' }
-    else {
+    if (-not (Tem-Warp)) {
         Aviso 'Cloudflare WARP nao encontrado (sem ele nao ha rotacao de IP pelo WARP).'
         if (Pergunta 'Instalar Cloudflare WARP agora? (pede permissao de administrador)') { [void](Winget-Instala 'Cloudflare.Warp' 'Cloudflare WARP') }
-        else { Info 'link: https://1.1.1.1/  (ou o launcher oferece instalar na primeira vez)' }
     }
+    if (Tem-Warp) { Ok 'Cloudflare WARP' } else { [void]$Faltando.Add(@('Cloudflare WARP (obrigatorio: troca de IP)', 'https://1.1.1.1/  (ou aceite quando o launcher oferecer instalar)')) }
 
-    # OpenCode Desktop (modo recomendado) - o launcher tambem instala a CLI sozinho se faltar
-    $desk = Join-Path $env:LOCALAPPDATA 'Programs\ai.opencode.desktop'
-    if (Test-Path -LiteralPath $desk) { Ok 'OpenCode Desktop' }
+    # OpenCode Desktop (caminho 2-1-1) - sem ele o launcher usa a CLI e instala ela sozinho
+    if (Tem-Desk) { Ok 'OpenCode Desktop' }
     else {
         Aviso 'OpenCode Desktop nao encontrado.'
         Info  'baixe e instale em: https://opencode.ai/download'
-        Info  '(sem o Desktop o launcher usa a CLI no terminal e instala ela sozinho se faltar)'
         if (Pergunta 'Abrir a pagina de download agora?') { Start-Process 'https://opencode.ai/download' }
+        [void]$Faltando.Add(@('OpenCode Desktop (obrigatorio no caminho 2-1-1)', 'https://opencode.ai/download'))
     }
 }
 
@@ -136,6 +139,32 @@ foreach ($f in $files) {
     Copy-Item -LiteralPath $src -Destination $dst -Force
 }
 Ok "copiado para $App"
+
+# Idiomas e temas ficam locais: o launcher baixaria do GitLab do projeto original na primeira execucao
+# (e cai para ingles quando o GitLab recusa). So preenche o que falta; nao troca copia existente.
+$batText = [IO.File]::ReadAllText((Join-Path $Launcher 'OpenCode Infinite.bat'))
+$langVer = if ($batText -match "\`$LangVer = '([^']+)'") { $matches[1] } else { '' }
+if ($langVer) {
+    $langDir = Join-Path $State 'lang'
+    New-Item -ItemType Directory -Force -Path $langDir | Out-Null
+    foreach ($lf in Get-ChildItem -LiteralPath (Join-Path $Launcher 'langs') -Filter '*.json') {
+        $dst = Join-Path $langDir $lf.Name
+        $ver = $dst + '.ver'
+        $cur = if (Test-Path -LiteralPath $ver) { ([IO.File]::ReadAllText($ver)).Trim() } else { '' }
+        if (-not (Test-Path -LiteralPath $dst) -or $cur -ne $langVer) {
+            Copy-Item -LiteralPath $lf.FullName -Destination $dst -Force
+            [IO.File]::WriteAllText($ver, $langVer)
+        }
+    }
+}
+$themeDir = Join-Path $State 'themes'
+$themeDst = Join-Path $themeDir 'themes.txt'
+if (-not (Test-Path -LiteralPath $themeDst)) {
+    New-Item -ItemType Directory -Force -Path $themeDir | Out-Null
+    Copy-Item -LiteralPath (Join-Path $Launcher 'themes\themes.txt') -Destination $themeDst -Force
+    [IO.File]::WriteAllText($themeDst + '.ver', '1')
+}
+Ok 'idiomas (pt e outros) e temas instalados localmente'
 
 # ------------------------------------------------------------------ 3. configuracao do launcher
 Titulo '3/6  Padroes: WARP, DeepSeek V4.1 max, mensagem de retomada'
@@ -243,8 +272,14 @@ elseif (Pergunta 'Instalar o bridge MCP (Claude Code delega tarefas ao DeepSeek 
 }
 
 # ------------------------------------------------------------------ fim
-Titulo 'Pronto'
-Info 'Para usar: de dois cliques em INICIAR.bat (ou arraste uma pasta de projeto em cima dele).'
-Info 'Na primeira execucao o launcher faz o setup dele (atalhos, comando opencodeinf, WARP).'
+if ($Faltando.Count) {
+    Titulo 'Instalado, mas ainda falta:'
+    foreach ($f in $Faltando) { Aviso $f[0]; Info $f[1] }
+    Info 'Instale o que falta e rode o INSTALAR.bat de novo para conferir.'
+} else {
+    Titulo 'Pronto'
+}
+Info 'Para usar: de dois cliques em INICIAR.bat e siga 2 - 1 - 1 (Desktop, ultima pasta, WARP).'
+Info 'Na primeira execucao o launcher faz o setup dele (atalhos, comando opencodeinf).'
 Write-Host ''
 exit 0

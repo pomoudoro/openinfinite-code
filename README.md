@@ -17,13 +17,17 @@ Bateu o limite? Troca o IP pelo Cloudflare WARP e o chat continua sozinho, no me
 
 ## ⚡ Começo rápido
 
+**1. Baixe o projeto** (um dos dois):
+
 ```powershell
 git clone https://github.com/pomoudoro/openinfinite-code.git
 ```
 
-1. Abra a pasta e dê dois cliques em **`INSTALAR.bat`**.
-2. Dê dois cliques em **`INICIAR.bat`**.
-3. No menu, siga o caminho **2 → 1 → 1**:
+ou, sem Git: no GitHub, **Code → Download ZIP** e extraia a pasta (por exemplo em `Documentos\openinfinite-code`).
+
+**2. Dê dois cliques em `INSTALAR.bat`.** Ele confere o que falta (Python, WARP, OpenCode Desktop, Node.js) e oferece instalar. No fim aparece **"Pronto"** ou a lista do que ainda falta, com os links. Instale o que faltar e rode o `INSTALAR.bat` de novo até aparecer "Pronto".
+
+**3. Dê dois cliques em `INICIAR.bat`** e siga o caminho **2 → 1 → 1**:
 
 > [!TIP]
 > ### ✅ Caminho recomendado: `2 - 1 - 1`
@@ -75,11 +79,12 @@ PowerShell 5.1 e `curl` já vêm no Windows 10/11.
 Pode rodar de novo quantas vezes quiser. Antes de trocar qualquer arquivo, ele guarda um backup em `%LOCALAPPDATA%\opencode-infinite\backup\`.
 
 1. **Dependências:** confere Python, Node.js, WARP e OpenCode Desktop, e oferece instalar.
-2. **Launcher:** copia `launcher\*` para `%LOCALAPPDATA%\opencode-infinite\app\`.
+2. **Launcher:** copia `launcher\*` para `%LOCALAPPDATA%\opencode-infinite\app\`, junto com os idiomas e temas (assim a interface já abre em português, sem baixar nada).
 3. **Padrões do launcher** (`config.json`): WARP, português, modelo `deepseek-v4.1-flash-free#max`, mensagem de retomada, rotação automática, update de terceiros desligado. Num `config.json` que já existe, preenche só o que estiver vazio.
 4. **Modelo padrão do OpenCode** (`%USERPROFILE%\.config\opencode\opencode.json`): grava `opencode/deepseek-v4.1-flash-free#max`. Se você já tem outro modelo, ele pergunta antes.
 5. **Orquestrador:** copia os agentes para `%USERPROFILE%\.config\opencode\agents\`.
 6. **Bridge Claude Code** *(opcional)*: `npm install` e `claude mcp add` (só se o `claude` existir).
+7. **Resumo:** termina com "Pronto" ou com a lista do que ainda falta instalar.
 
 Opções: `INSTALAR.bat -Sim` (responde sim a tudo) · `INSTALAR.bat -SemDependencias` (pula a etapa 1).
 
@@ -129,6 +134,8 @@ Depois é só abrir o `INICIAR.bat`: ele percebe que os arquivos da pasta mudara
 
 | Sintoma | Solução |
 |---|---|
+| *"O Windows protegeu o computador"* ao abrir um `.bat` do ZIP | Clique em **Mais informações → Executar assim mesmo**. Acontece com qualquer `.bat` baixado da internet; o instalador libera os outros arquivos da pasta. |
+| O `INSTALAR.bat` instalou o Python/Node mas ainda diz que falta | Feche a janela e abra o `INSTALAR.bat` de novo: o Windows só atualiza o PATH em janelas novas. |
 | *"WARP is not usable - OpenCode was not started"* | Abra o app do Cloudflare WARP uma vez e aceite os termos. Depois, no terminal: `warp-cli registration new` e `warp-cli connect`. |
 | A retomada não acha o chat | Confira `python --version` no terminal. Se abrir a Microsoft Store, instale o Python pelo link acima marcando *Add to PATH*. |
 | Desktop app aparece como *not installed* | Instale pelo <https://opencode.ai/download> e, no menu de modo, use *Detect the desktop app again*. |
