@@ -112,6 +112,8 @@ Opções: `INSTALAR.bat -Sim` (responde sim a tudo) · `INSTALAR.bat -SemDepende
 | Modelo da retomada | `opencode/deepseek-v4.1-flash-free#max` | Settings → Session → Resume model |
 | Mensagem de retomada | `voltamos, pode continuar e retomar de onde parou` | Settings → Session |
 | Ação no limite | `rotate` (troca o IP e continua) | Settings → IP rotation |
+| O que cada erro faz | limite grátis → troca o IP · limite do provedor/créditos → pergunta · contexto/modelo → nada | `%LOCALAPPDATA%\opencode-infinite\patterns.conf` |
+| Idioma do OpenCode | qualquer um | — |
 | Atualização do launcher | desligada | — |
 | Idioma | português | Settings |
 
@@ -139,6 +141,8 @@ Depois é só abrir o `INICIAR.bat`: ele percebe que os arquivos da pasta mudara
 | *"WARP is not usable - OpenCode was not started"* | Abra o app do Cloudflare WARP uma vez e aceite os termos. Depois, no terminal: `warp-cli registration new` e `warp-cli connect`. |
 | A retomada não acha o chat | Confira `python --version` no terminal. Se abrir a Microsoft Store, instale o Python pelo link acima marcando *Add to PATH*. |
 | Desktop app aparece como *not installed* | Instale pelo <https://opencode.ai/download> e, no menu de modo, use *Detect the desktop app again*. |
+| Bateu o limite e o launcher **perguntou** em vez de trocar o IP | O seu `patterns.conf` é antigo. Rode o `INSTALAR.bat`: ele guarda um backup e volta aos padrões. |
+| Funciona com o OpenCode em português? | Sim. O launcher não lê o texto da tela: ele procura o código do erro (`provider.free-limit` / `Free usage limit reached`) no log e no banco do OpenCode, e isso é gravado em inglês em qualquer idioma da interface. |
 | Quero ver o que aconteceu | `%LOCALAPPDATA%\opencode-infinite\launcher.log` |
 | Aparece pedido de atualização do launcher | Você está rodando uma cópia antiga: rode o `INSTALAR.bat` desta pasta. |
 | Rodei um `.bat` baixado do projeto original | Ele pode substituir a cópia instalada se tiver versão maior. Rode o `INSTALAR.bat` desta pasta de novo para voltar a esta versão. |
@@ -176,6 +180,8 @@ Correções trazidas do projeto original (até a 2.60.28), sem mexer nas nossas 
 - **Serviço do WARP checado pelo PowerShell**, o que funciona em qualquer idioma do Windows.
 - **Banco de chats incompatível** é renomeado para `opencode.db.incompatible-*` (nunca apagado) e o OpenCode abre limpo.
 - Pequenas correções: aspas do `%PSX%`, IP lido dentro de bloco, aviso quando o modo Auto falha de forma inesperada, variáveis de ambiente ausentes.
+
+- **Limite grátis troca o IP sozinho já na primeira instalação:** antes, sem um `patterns.conf` pronto, o launcher criava um que só perguntava.
 
 A versão subiu para **2.61.0**, acima de qualquer 2.60.x do original, para um `.bat` deles não substituir a cópia instalada por ser "mais novo".
 

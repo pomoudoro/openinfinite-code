@@ -206,6 +206,18 @@ if (Test-Path -LiteralPath $cfgPath) {
     Grava-Json ([pscustomobject]@{ version = 1; settings = [pscustomobject]$defaults }) $cfgPath
     Ok "config.json criado em $State"
 }
+# patterns.conf decide o que cada erro faz. O limite gratis precisa estar em rotate= (troca o IP sozinho);
+# um arquivo antigo com ele em ask= so perguntaria. Sem o arquivo, o launcher cria um com os padroes certos.
+$patPath = Join-Path $State 'patterns.conf'
+if (Test-Path -LiteralPath $patPath) {
+    $patText = [IO.File]::ReadAllText($patPath)
+    $rotLine = ([regex]::Match($patText, '(?m)^rotate=(.*)$')).Groups[1].Value
+    if ($rotLine -notmatch 'free usage limit') {
+        Backup-Arquivo $patPath
+        Remove-Item -LiteralPath $patPath -Force
+        Ok 'patterns.conf antigo (limite gratis so perguntava) trocado pelos padroes: agora troca o IP sozinho'
+    } else { Ok 'patterns.conf: limite gratis troca o IP sozinho' }
+}
 Info "modelo da retomada : $DefaultModel"
 Info "mensagem de retomada: $ResumeMsg"
 
