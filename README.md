@@ -134,6 +134,7 @@ Depois é só abrir o `INICIAR.bat`: ele percebe que os arquivos da pasta mudara
 | Desktop app aparece como *not installed* | Instale pelo <https://opencode.ai/download> e, no menu de modo, use *Detect the desktop app again*. |
 | Quero ver o que aconteceu | `%LOCALAPPDATA%\opencode-infinite\launcher.log` |
 | Aparece pedido de atualização do launcher | Você está rodando uma cópia antiga: rode o `INSTALAR.bat` desta pasta. |
+| Rodei um `.bat` baixado do projeto original | Ele pode substituir a cópia instalada se tiver versão maior. Rode o `INSTALAR.bat` desta pasta de novo para voltar a esta versão. |
 
 ---
 
@@ -153,6 +154,23 @@ openinfinite-code/
 ├── claude-bridge/          MCP Claude Code → OpenCode (opcional)
 └── scripts/instalar.ps1    lógica do instalador
 ```
+
+---
+
+## 🗒️ Versões
+
+### Launcher v2.61.0
+Correções trazidas do projeto original (até a 2.60.28), sem mexer nas nossas personalizações:
+
+- **Checagem de TLS antes de abrir:** se o IP novo passa no teste do WARP mas o opencode.ai recusa a conexão segura ("SSL handshake failed"), troca de IP em vez de abrir num chat que vai cair. Esse erro no log também passa a disparar a troca.
+- **Esperas com `ping` em vez de `timeout`:** o `timeout` aborta sem teclado ligado e podia matar uma troca de IP automática.
+- **Loop ao sair** quando existe `config.json`.
+- **Retomada mais segura:** só confia no resultado do ajudante do chat quando ele terminou sem erro.
+- **Serviço do WARP checado pelo PowerShell**, o que funciona em qualquer idioma do Windows.
+- **Banco de chats incompatível** é renomeado para `opencode.db.incompatible-*` (nunca apagado) e o OpenCode abre limpo.
+- Pequenas correções: aspas do `%PSX%`, IP lido dentro de bloco, aviso quando o modo Auto falha de forma inesperada, variáveis de ambiente ausentes.
+
+A versão subiu para **2.61.0**, acima de qualquer 2.60.x do original, para um `.bat` deles não substituir a cópia instalada por ser "mais novo".
 
 ---
 
