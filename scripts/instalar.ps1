@@ -171,6 +171,7 @@ Titulo '3/6  Padroes: WARP, DeepSeek V4.1 max, mensagem de retomada'
 $cfgPath = Join-Path $State 'config.json'
 $defaults = [ordered]@{
     OC_EGRESS_DEFAULT = 'WARP'
+    OC_MODE_DEFAULT   = 'DESKTOP' # pula a tela de modo: o caminho fica 2-1-1
     OCUI_LANG         = 'pt'
     OC_MODEL          = $DefaultModel
     RESUME_MSG        = $ResumeMsg
@@ -291,7 +292,7 @@ if ($Faltando.Count) {
 } else {
     Titulo 'Pronto'
 }
-Info 'Para usar: de dois cliques em INICIAR.bat e siga 2 - 1 - 1 (Desktop, ultima pasta, WARP).'
+Info 'Para usar: de dois cliques em INICIAR.bat e siga 2 - 1 - 1 (Launch OpenCode, WARP, New IP).'
 Info 'Na primeira execucao o launcher faz o setup dele (atalhos, comando opencodeinf).'
 Write-Host ''
 exit 0

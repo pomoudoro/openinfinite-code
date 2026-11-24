@@ -33,12 +33,12 @@ ou, sem Git: no GitHub, **Code → Download ZIP** e extraia a pasta (por exemplo
 > ### ✅ Caminho recomendado: `2 - 1 - 1`
 > | Tela | Escolha |
 > |---|---|
-> | Modo | **[2] Desktop app** |
-> | Pasta | **[1] Reabrir a última pasta** |
+> | Início | **[2] Launch OpenCode** |
 > | Conexão | **[1] WARP** |
+> | Menu | **[1] New IP and start OpenCode** |
 >
-> Use **2-1-1** e não 1-1-1. O `1` na primeira tela abre a CLI no terminal; o `2` abre o OpenCode Desktop, que é o modo testado com a retomada automática.
-> Na primeira vez ainda não há "última pasta": escolha a pasta do projeto e, a partir daí, é sempre 2-1-1.
+> Use **2-1-1** e não 1-1-1. O `[1] Auto opencode` da tela inicial pula tudo e abre uma sessão nova; o `[2]` passa pela escolha da conexão e pega um IP novo antes de abrir o OpenCode Desktop, que é o caminho testado com a retomada automática.
+> O modo Desktop já vem salvo pelo instalador, por isso não aparece tela de modo nem de pasta (o próprio Desktop escolhe o projeto). Se o Desktop não estiver instalado, aparece a tela de modo antes da conexão.
 
 ---
 
