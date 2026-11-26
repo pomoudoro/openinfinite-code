@@ -37,6 +37,10 @@ $WpSha = 'bce041ea9fe0f8a3351301dcbe29cdf6a523bb25cf9c62f17ebb5699a8051d0f'
 $WpExeSha = 'b176b561fd8bf15d828fcab484cfd5b4fb941cb9f61807901ca64b955af27e1f'
 $WpUrl = 'https://github.com/windtf/wireproxy/releases/download/v1.1.3/wireproxy_windows_amd64.tar.gz'
 $PeerEndpoint = '162.159.192.1:2408'
+# WARP endpoints a slot cycles through when it is rebuilt. Measured from this host: one identity
+# answered on all of these; 162.159.193.1:2408 did not. A rebuilt slot moves to the next one, so
+# an endpoint that stopped answering the slot's handshakes is not retried in a loop.
+$PeerEndpoints = @('162.159.192.1:2408', '188.114.97.1:2408', '162.159.195.1:2408', '162.159.192.1:4500', '188.114.96.1:500')
 $ScriptVersion = '1.1'
 
 $State = [IO.Path]::GetFullPath($State)
@@ -163,7 +167,7 @@ function Get-Slot([int]$n) {
   $defaults = [ordered]@{
     slot = $n; port = (SlotPort $n); pid = 0; pidStart = [long]0; identity = ''; conf = '';
     ip = ''; colo = ''; warp = ''; health = 'down'; verifiedAt = ''; burned = @();
-    rotations = 0; lastCheck = ''; owner = $null
+    rotations = 0; lastCheck = ''; owner = $null; epIdx = 0; endpoint = ''
   }
   foreach ($k in $defaults.Keys) {
     if ($null -eq $o.PSObject.Properties[$k]) {
@@ -611,7 +615,7 @@ function Convert-ProfileText([string]$text, [int]$port) {
   $out.Add('BindAddress = 127.0.0.1:' + $port)
   return (($out -join "`r`n") + "`r`n")
 }
-function Write-RunConf([int]$n) {
+function Write-RunConf([int]$n, [switch]$NextEndpoint) {
   $dir = SlotDir $n
   $prof = Join-Path $dir 'profile.conf'
   if (-not (Test-Path -LiteralPath $prof)) { throw ('profile.conf missing for slot ' + $n) }
@@ -619,6 +623,14 @@ function Write-RunConf([int]$n) {
   $s = Get-Slot $n
   $port = [int]$s.port
   if (-not (Test-SlotPortInRange $port)) { $port = SlotPort $n }
+  $idx = 0
+  try { $idx = [int]$s.epIdx } catch { $idx = 0 }
+  if ($NextEndpoint) { $idx++ }
+  $idx = (($idx % $PeerEndpoints.Count) + $PeerEndpoints.Count) % $PeerEndpoints.Count
+  $script:PeerEndpoint = $PeerEndpoints[$idx]
+  $s.epIdx = $idx
+  $s.endpoint = $script:PeerEndpoint
+  Save-Slot $s
   $norm = Convert-ProfileText $txt $port
   $run = Join-Path $dir 'run.conf'
   [IO.File]::WriteAllText($run, $norm, (New-Object Text.UTF8Encoding($false)))
@@ -810,7 +822,7 @@ function Wait-SlotHealthy([int]$n, [int]$seconds, [string[]]$avoid = @()) {
   if ($last) { return @{ ok = $false; reason = 'same ip'; trace = $last.trace } }
   return @{ ok = $false; reason = 'no trace'; trace = $null }
 }
-function Start-Slot([int]$n, [switch]$NewIdentity, [string]$PrevIp = '', [int]$WaitSec = 25, [switch]$AvoidBurned) {
+function Start-Slot([int]$n, [switch]$NewIdentity, [string]$PrevIp = '', [int]$WaitSec = 25, [switch]$AvoidBurned, [switch]$NextEndpoint) {
   $s = Get-Slot $n
   if (-not (Test-SlotPortInRange ([int]$s.port))) { $s.port = SlotPort $n }
   # One wireproxy per slot: any process still serving this slot is stopped first, so a restart,
@@ -821,7 +833,7 @@ function Start-Slot([int]$n, [switch]$NewIdentity, [string]$PrevIp = '', [int]$W
   if ($AvoidBurned) { $avoid += @(Get-BurnedIps $s) }
   try {
     $identity = Ensure-Identity $n -NewIdentity:$NewIdentity
-    $run = Write-RunConf $n
+    $run = Write-RunConf $n -NextEndpoint:$NextEndpoint
     $s = Get-Slot $n
     $s.identity = $identity
     $s.conf = $run
@@ -874,7 +886,7 @@ function Rotate-Slot([int]$n, [switch]$ForceIdentity, [int]$MaxIdentity = 2, [in
   # twice escalates to a new identity. Start-Slot stops the running wireproxy itself.
   if (-not $ForceIdentity) {
     for ($i = 1; $i -le 2; $i++) {
-      $r = Start-Slot $n -PrevIp $oldIp -WaitSec $WaitSec -AvoidBurned
+      $r = Start-Slot $n -PrevIp $oldIp -WaitSec $WaitSec -AvoidBurned -NextEndpoint:($i -ge 2)
       if ($r.ok) { $lastIp = [string]$r.ip; $success = $true; break }
     }
   }
@@ -954,7 +966,7 @@ function Invoke-UpLocked {
       # port). So attempt 2 only restarts; attempt 3 registers a new identity.
       for ($attempt = 1; $attempt -le 3; $attempt++) {
         try {
-          $r = Start-Slot $n -NewIdentity:($attempt -ge 3) -WaitSec 25
+          $r = Start-Slot $n -NewIdentity:($attempt -ge 3) -NextEndpoint:($attempt -ge 2) -WaitSec 25
           if ($r.ok) { $ok = $true; break }
           Write-Event 'slot-attempt' @{ slot = $n; attempt = $attempt; ok = $false; reason = $r.reason }
           Write-Host ('slot ' + $n + ' attempt ' + $attempt + ' failed: ' + $r.reason)
@@ -1307,8 +1319,22 @@ function Invoke-Daemon {
             $fails[$n] = 0
             continue
           }
-          $fails[$n] = [int]$fails[$n] + 1
           $alive = Test-SlotProcess $s
+          # Confirm at once instead of waiting a whole HealthSec: a stalled slot left the instance
+          # using it hanging for up to two cycles (~1 min) before the rebuild, then ECONNRESET.
+          if ($alive -and $m.reason -eq 'no trace') {
+            Start-Sleep -Seconds 3
+            $m2 = Measure-Slot $s 8
+            if ($m2.ok) {
+              $s.ip = [string]$m2.trace.ip; $s.colo = [string]$m2.trace.colo; $s.warp = [string]$m2.trace.warp
+              $s.health = 'up'; $s.verifiedAt = (Get-Date).ToString('o'); Save-Slot $s
+              $fails[$n] = 0
+              continue
+            }
+            $m = $m2
+            $fails[$n] = [int]$fails[$n] + 1
+          }
+          $fails[$n] = [int]$fails[$n] + 1
           # A restart gives the slot a new exit IP under whoever is using it, so one lost trace on a
           # live tunnel only marks it degraded; the second consecutive failure rebuilds it. The
           # rebuild is what clears a stalled UDP path (handshake sent, never answered): wireproxy
@@ -1327,11 +1353,12 @@ function Invoke-Daemon {
             continue
           }
           Write-Event 'daemon-restart' @{ slot = $n; reason = $m.reason; fails = [int]$fails[$n] }
-          $r = Start-Slot $n -WaitSec 30
+          # Rebuilt on the next WARP endpoint: the stalled one is not answering this identity.
+          $r = Start-Slot $n -WaitSec 30 -NextEndpoint
           # The same identity keeps failing: a fresh wgcf device (a manual .conf in WgDir still wins).
           if (-not $r.ok -and ($fails[$n] % 4) -eq 0) {
             Write-Event 'daemon-new-identity' @{ slot = $n; reason = $r.reason }
-            $r = Start-Slot $n -NewIdentity -WaitSec 30
+            $r = Start-Slot $n -NewIdentity -NextEndpoint -WaitSec 30
           }
           if ($r.ok) { $fails[$n] = 0; Refresh-ClaimIp $n }
           else { Write-Event 'daemon-restart-failed' @{ slot = $n; reason = $r.reason } }

@@ -264,6 +264,7 @@ Correções do pool WPOOL (`warp-pool.ps1` 1.1), medidas nesta máquina antes e 
 - **Launcher:** rotate sem IP novo mantém o slot da janela (antes caía no caminho antigo sem `.conf` e perguntava "continuar direto?"); o boot para de esperar assim que o `up` falha (`pool\up.rc`); o daemon também sobe quando o `up` termina com colisão ou sem slot.
 - **Dispatcher:** `XDG_*` e proxy em minúsculas por worker, `::1` no `NO_PROXY`, trace pelo proxy antes de lançar, `slot`/`ip` no `worker_start`.
 - **`PersistentKeepalive = 25`** nos perfis do pool.
+- **Túnel travado reabre rápido e em outro endpoint:** às vezes o Cloudflare para de responder ao handshake de um slot por alguns minutos (medido: a mesma identidade responde em outros endpoints). O vigia confirma a falha na hora (segunda medição 3 s depois) e reabre o slot no próximo endpoint da lista (`162.159.192.1:2408`, `188.114.97.1:2408`, `162.159.195.1:2408`, `162.159.192.1:4500`, `188.114.96.1:500`). Antes, a janela ficava ~1 min pendurada até levar `ECONNRESET`. O endpoint atual aparece em `slotNN\slot.json` (`endpoint`).
 
 ### Launcher v2.62.0
 O pool de egress WARP passou a fazer parte do launcher (os comentários do código usam `v2.62`):
