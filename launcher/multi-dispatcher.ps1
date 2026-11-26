@@ -154,6 +154,25 @@ function Read-PoolClaim {
     return $c
   } catch { return $null }
 }
+# Trace through the worker's proxy; nothing may bypass it. Returns @{ip;warp} or $null.
+function Test-WorkerEgress {
+  param([string]$Proxy)
+  if (-not $Proxy) { return $null }
+  $oldEa = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    # PS 5.1 drops an empty native argument, so --noproxy gets a host that never matches instead of ''.
+    $txt = & curl.exe -s --max-time 10 --noproxy 'none.invalid' -x $Proxy 'https://www.cloudflare.com/cdn-cgi/trace' 2>$null
+    $ip = ''; $warp = ''
+    foreach ($ln in @($txt)) {
+      if ($ln -like 'ip=*') { $ip = $ln.Substring(3).Trim() }
+      elseif ($ln -like 'warp=*') { $warp = $ln.Substring(5).Trim() }
+    }
+    if (-not $ip -or $warp -ne 'on') { return $null }
+    return @{ ip = $ip; warp = $warp }
+  } catch { return $null }
+  finally { $ErrorActionPreference = $oldEa }
+}
 function Claim-PoolSlot {
   param([string]$Instance)
   for ($try = 1; $try -le 3; $try++) {
@@ -298,20 +317,44 @@ try {
         '--prompt', ('"' + ($prompt -replace '"','\"') + '"')
       ) -join ' '
       # Build env: OPENCODE data dir and local HOME override so device identity stays isolated per worker.
+      # ProcessStartInfo inherits the dispatcher's environment, so an XDG_* set there would beat the
+      # per-worker USERPROFILE: the XDG roots are pinned explicitly (global-roots.ts reads them).
       $envBlock = @{
-        'LOCALAPPDATA' = $w.inst.data
-        'APPDATA'      = $w.inst.data
-        'USERPROFILE'  = $w.inst.data
-        'HOME'         = $w.inst.data
-        'OC_WORKER'    = $k
-        'OC_MODEL'     = $modelArg
+        'LOCALAPPDATA'    = $w.inst.data
+        'APPDATA'         = $w.inst.data
+        'USERPROFILE'     = $w.inst.data
+        'HOME'            = $w.inst.data
+        'XDG_DATA_HOME'   = (Join-Path $w.inst.data '.local\share')
+        'XDG_STATE_HOME'  = (Join-Path $w.inst.data '.local\state')
+        'XDG_CONFIG_HOME' = (Join-Path $w.inst.data '.config')
+        'XDG_CACHE_HOME'  = (Join-Path $w.inst.data '.cache')
+        'OC_WORKER'       = $k
+        'OC_MODEL'        = $modelArg
       }
       if ($PoolActive) {
-        $envBlock['HTTP_PROXY'] = [string]$w.proxy
-        $envBlock['HTTPS_PROXY'] = [string]$w.proxy
-        $envBlock['NO_PROXY'] = 'localhost,127.0.0.1'
+        # Bun reads either case; both are set so no inherited value can win.
+        foreach ($pv in @('HTTP_PROXY','HTTPS_PROXY','http_proxy','https_proxy')) { $envBlock[$pv] = [string]$w.proxy }
+        $envBlock['NO_PROXY'] = '127.0.0.1,localhost,::1'
+        $envBlock['no_proxy'] = '127.0.0.1,localhost,::1'
         $envBlock['OC_WPOOL_SLOT'] = [string]$w.slot
         $envBlock['OC_WPOOL_IP'] = [string]$w.ip
+      }
+      if ($PoolActive -and -not $DryRun) {
+        # Plan, verification level 2: the exit this worker will use is checked through its own proxy
+        # right before launch. A dead slot is rotated once; still dead -> the item waits for the
+        # next poll instead of running direct (a silent direct run looks healthy).
+        $pre = Test-WorkerEgress ([string]$w.proxy)
+        if (-not $pre) {
+          $rcPre = Invoke-PoolScript -Action 'rotate' -SlotNumber ([int]$w.slot)
+          $claimPre = Read-PoolClaim $k
+          if ($claimPre) { $w['proxy'] = [string]$claimPre.proxy; $w['ip'] = [string]$claimPre.ip; $w['slot'] = [int]$claimPre.slot }
+          $pre = Test-WorkerEgress ([string]$w.proxy)
+          if (-not $pre) {
+            Emit 'worker_preflight_failed' @{ worker=$k; id=$item.id; slot=[int]$w.slot; rotate_exit=$rcPre }
+            continue
+          }
+        }
+        if ($pre.ip) { $w['ip'] = [string]$pre.ip; $envBlock['OC_WPOOL_IP'] = [string]$pre.ip }
       }
       if ($DryRun) {
         Emit 'worker_dry_run' @{ worker=$k; id=$item.id; cwd=$Project; env=$envBlock; args=$argLine }
@@ -336,7 +379,9 @@ try {
       $w['capture'] = New-Object OpenInfinite.AsyncCapture($proc)
       $w.capture.Begin()
       $w.busy = $true; $w.proc = $proc; $w.startedAt = Get-Date
-      Emit 'worker_start' @{ worker=$k; id=$item.id; pid=$proc.Id; model=$modelArg }
+      $startInfo = @{ worker=$k; id=$item.id; pid=$proc.Id; model=$modelArg }
+      if ($PoolActive) { $startInfo['slot'] = [int]$w.slot; $startInfo['ip'] = [string]$w.ip; $startInfo['proxy'] = [string]$w.proxy }
+      Emit 'worker_start' $startInfo
     }
 
     # 3) Drain exit.

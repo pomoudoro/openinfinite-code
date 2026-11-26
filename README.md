@@ -99,10 +99,16 @@ O pool cria **N túneis WARP** com **um proxy local por slot**: cada instância 
 - Cada slot tem identidade wgcf própria, um `wireproxy` e um proxy HTTP local na porta `WPOOL_PORT_BASE + número do slot` (slot 1 usa `base+1`).
 - O IPv4 free do WARP é CGNAT compartilhado: todos os devices saem pelo mesmo IPv4. O pool usa o **IPv6 por device** para distinguir as saídas; por isso um slot só é aceito se o trace retornar IPv6 e `warp=on`.
 - O perfil é normalizado com `::/0` no `AllowedIPs`, `DNS = 1.1.1.1` e peer literal `162.159.192.1:2408` (o hostname `engage.cloudflareclient.com` resolve AAAA primeiro e o handshake morre neste host).
-- O launcher é o provider de `EGRESS=WIREGUARD`: cada janela faz `claim` do menor slot livre, `rotate` só do seu slot e `release` ao fechar. O pool não mexe no Desktop nem em outros egress.
-- `pool\pool-status.json` guarda `up`, `distinct`, `portBase` e a tabela de slots; `claims\<instância>.json` guarda `instance/slot/port/proxy/ip/at`; `pool-config.json` fixa `portBase`/`count` para os comandos seguintes não trocarem de base.
-- O daemon checa saúde a cada `WPOOL_HEALTH_SEC`, recompõe slots mortos e chama `reap` por lease. `down` grava `stop.flag` para o daemon não ressuscitar os túneis.
-- **Limitação:** destino IPv4-only sai pelo IPv4 compartilhado (CGNAT); IP próprio por instância exige IPv6 no destino.
+- O perfil ganha `PersistentKeepalive = 25`: slot parado não perde o mapeamento UDP do roteador (nem do túnel do app WARP).
+- O launcher é o provider de `EGRESS=WIREGUARD`: cada janela faz `claim` do menor slot livre, `rotate` só do seu slot e `release` ao fechar. O pool não mexe no Desktop nem em outros egress — uma janela em WARP, Tor ou lista de proxies continua no seu egress (o `launcher.log` avisa: `only a WireGuard window takes a pool slot`).
+- **Dono do claim:** o claim registra o processo que ficou vivo (a janela `cmd.exe` do launcher ou o dispatcher), por PID + horário de início. Enquanto ele vive, o slot é dele; quando ele fecha, `reap` (ou o próximo `claim`) libera. `WPOOL_LEASE_MIN` só vale para claims antigos, sem dono registrado.
+- `pool\pool-status.json` guarda `up`, `distinct`, `portBase` e a tabela de slots; `pool\claims\<instância>.json` guarda `instance/slot/port/proxy/ip/owner`; `instances\<instância>\egress.json` diz por onde aquela instância sai; `pool-config.json` fixa `portBase`/`count` para os comandos seguintes não trocarem de base.
+- Cada `wireproxy` nasce destacado (sem herdar handles nem console, fora do job de quem chamou): fechar a janela que subiu o pool não derruba os slots, e quem chama o script por pipe não fica esperando.
+- `up` tem trava própria (`pool\up.lock`) e cada ação pega o lock do slot (`pool\slotNN.lock`): dois `up`, o daemon e um `rotate` nunca sobem dois `wireproxy` na mesma porta. Porta ocupada por outro programa falha o slot em vez de medir o proxy alheio.
+- O daemon checa saúde a cada `WPOOL_HEALTH_SEC`. Um trace perdido só marca `degraded`; a segunda falha seguida reconstrói o slot (processo morto, `warp=off` ou porta fechada reconstroem na hora). Falhas repetidas têm backoff e, a cada 4 ciclos, tentam identidade nova. Colisão de IP gira o slot mais novo. `down` grava `stop.flag` para o daemon não ressuscitar os túneis.
+- **Medido:** o IPv6 de saída de um túnel vivo muda sozinho de tempos em tempos (mesmo processo, IP novo depois de um rehandshake). Os slots continuam com IPs distintos entre si; o daemon registra `ip-drift` e atualiza claim e `egress.json`.
+- **App WARP conectado:** com `WPOOL_ALLOW_WARP_TUNNEL=1` (padrão) o pool roda por dentro do túnel do app, e cada slot mantém o próprio IPv6 (medido: 5 MB a ~15 MB/s, `opencode.ai` vê o IPv6 do slot). Com `0`, o `up` recusa com exit 6 enquanto o `warp-cli` disser `Connected`.
+- **Limitação:** destino IPv4-only sai pelo IPv4 compartilhado (CGNAT); IP próprio por instância exige IPv6 no destino (`opencode.ai` tem AAAA).
 
 ### Como rodar
 
@@ -118,7 +124,9 @@ powershell ... -File warp-pool.ps1 -Action rotate -Slot 1
 powershell ... -File warp-pool.ps1 -Action down
 ```
 
-Listar todas as ações: `up|status|claim|release|rotate|verify|down|daemon|reap`. `-State` aponta a raiz do estado (padrão: `%LOCALAPPDATA%\opencode-infinite`), `-Slot` escolhe o slot no `rotate` e no `down` parcial, `-Instance` identifica a janela no `claim`/`release`. `-Force` no `rotate` gera identidade nova em vez de só reconectar. `-AllowWarpTunnel` só em teste — em produção ele empilha WARP sobre WARP e o `up` se recusa se o `warp-cli` estiver Connected.
+Listar todas as ações: `up|status|claim|release|rotate|verify|down|daemon|reap`. `-State` aponta a raiz do estado (padrão: `%LOCALAPPDATA%\opencode-infinite`), `-Slot` escolhe o slot no `rotate` e no `down` parcial, `-Instance` identifica a janela no `claim`/`release`. `-Force` no `rotate` gera identidade nova em vez de só reconectar. `-OwnerPid` no `claim` diz qual processo é o dono (padrão: quem chamou o script). `-AllowWarpTunnel` força o `up` com o app WARP conectado mesmo com `WPOOL_ALLOW_WARP_TUNNEL=0`.
+
+Códigos de saída: `0` ok, `2` sem IP novo/distinto, `3` slot ou processo morto, `4` trava ocupada, `6` app WARP conectado e não permitido, `7` nenhum slot livre.
 
 Pool de CLIs em paralelo:
 
@@ -127,7 +135,7 @@ powershell ... -File queue-add.ps1 -Prompt "resuma X"
 powershell ... -File multi-dispatcher.ps1 -Pool on -Count 4 -Drain
 ```
 
-No dispatcher, `auto` desativa o pool se `up=0` (volta ao caminho antigo), `on` exige slots up e aborta se não houver, e `off` mantém o caminho antigo. Cada worker recebe `HTTP_PROXY`/`HTTPS_PROXY` próprios e `NO_PROXY=localhost,127.0.0.1`.
+No dispatcher, `auto` desativa o pool se `up=0` (volta ao caminho antigo), `on` exige slots up e aborta se não houver, e `off` mantém o caminho antigo. Cada worker recebe `HTTP_PROXY`/`HTTPS_PROXY` (e `http_proxy`/`https_proxy`) próprios, `NO_PROXY=127.0.0.1,localhost,::1` e `XDG_DATA_HOME`/`XDG_STATE_HOME`/`XDG_CONFIG_HOME`/`XDG_CACHE_HOME` dentro da pasta do worker — um `XDG_*` herdado venceria o `USERPROFILE` isolado. Antes de cada lançamento o dispatcher faz um trace pelo proxy do worker; slot morto é girado uma vez e, se continuar morto, o item espera a próxima volta em vez de sair direto pelo IP da casa. `worker_start` registra `slot`, `ip` e `proxy`.
 
 ### Testes
 
@@ -153,7 +161,13 @@ Depois: `claim -Instance a1` e `claim -Instance a2` devem dar slots/portas disti
 
 `down` → portas fechadas, nenhum `wireproxy` do teste vivo e `stop.flag` presente em `pool\`. Limpe `%TEMP%\wpool-teste` no fim.
 
-Dispatcher: `-DryRun -Pool off` com fila de 1 e de 2 itens deve processar cada id uma vez. Com um stub de pool (status e claims no `-State` de teste), `-Pool on` deve dar `HTTP_PROXY` distinto por worker e `NO_PROXY=localhost,127.0.0.1`.
+Dono e reap: rode `claim -Instance a1 -OwnerPid <pid de um processo seu>`; com o dono vivo, `reap` não libera nem com o `at` do claim envelhecido à mão; mate o dono e `reap` libera o claim e o `instances\a1\egress.json`.
+
+Pipe: `powershell ... -Action rotate -Slot 1 -State ... 2>&1 | Out-String` tem que voltar em segundos (na v2.62.0 ficava preso até o `wireproxy` morrer).
+
+Daemon: com `-Action daemon -HealthSec 5` rodando, mate o `wireproxy` de um slot; em ~15 s o slot volta `up` com PID novo (`daemon-restart` em `recovery-events.jsonl`).
+
+Dispatcher: `-DryRun -Pool off` com fila de 1 e de 2 itens deve processar cada id uma vez. Com o pool de teste de pé, `-DryRun -Pool on` deve dar proxy distinto por worker, `NO_PROXY=127.0.0.1,localhost,::1` e `XDG_*` dentro de `instances\instNN\data`.
 
 Se algo falhar, olhe `recovery-events.jsonl`, `pool\pool-status.json` e `instances\egress\slotNN\slot.json` (todos dentro de `-State`).
 
@@ -238,6 +252,18 @@ openinfinite-code/
 ---
 
 ## 🗒️ Versões
+
+### Launcher v2.62.1
+Correções do pool WPOOL (`warp-pool.ps1` 1.1), medidas nesta máquina antes e depois:
+
+- **Claim não expira mais com a janela viva:** na 2.62.0 o `reap` do daemon liberava todo claim depois de `WPOOL_LEASE_MIN` (15 min), mesmo em uso, e outra janela podia pegar o mesmo slot e o mesmo IP. Agora o dono é o processo da janela/dispatcher e só sai quando ele fecha.
+- **Detecção do app WARP:** o `warp-cli` atual escreve `Status update: Connected`, que a 2.62.0 não reconhecia. Nova chave `WPOOL_ALLOW_WARP_TUNNEL` (padrão 1) decide se o pool roda por dentro do app.
+- **Slots não morrem mais em cadeia:** o daemon reiniciava um slot sem parar o `wireproxy` antigo e sem o lock do slot, e dois `up` ao mesmo tempo registravam identidades por cima um do outro. Agora há `up.lock`, lock por slot, parada antes de subir, checagem de porta e só um restart depois de duas falhas seguidas.
+- **`wireproxy` destacado:** o dispatcher não trava mais no `rotate` (handle herdado pelo pipe) e fechar a janela que subiu o pool não derruba os slots.
+- **Rotate respeita `burned[]`**, colisão de IP gira o slot de verdade (antes só marcava `degraded`), e `instances\<instância>\egress.json` existe como no plano.
+- **Launcher:** rotate sem IP novo mantém o slot da janela (antes caía no caminho antigo sem `.conf` e perguntava "continuar direto?"); o boot para de esperar assim que o `up` falha (`pool\up.rc`); o daemon também sobe quando o `up` termina com colisão ou sem slot.
+- **Dispatcher:** `XDG_*` e proxy em minúsculas por worker, `::1` no `NO_PROXY`, trace pelo proxy antes de lançar, `slot`/`ip` no `worker_start`.
+- **`PersistentKeepalive = 25`** nos perfis do pool.
 
 ### Launcher v2.62.0
 O pool de egress WARP passou a fazer parte do launcher (os comentários do código usam `v2.62`):
