@@ -949,9 +949,12 @@ function Invoke-UpLocked {
       }
       Stop-SlotProcess $n | Out-Null
       $ok = $false
-      for ($attempt = 1; $attempt -le 2; $attempt++) {
+      # Measured: a slot that gets no handshake reply usually has a stalled UDP path, not a bad
+      # identity -- the same identity and endpoint answer again from a new process (new source
+      # port). So attempt 2 only restarts; attempt 3 registers a new identity.
+      for ($attempt = 1; $attempt -le 3; $attempt++) {
         try {
-          $r = Start-Slot $n -NewIdentity:($attempt -gt 1) -WaitSec 25
+          $r = Start-Slot $n -NewIdentity:($attempt -ge 3) -WaitSec 25
           if ($r.ok) { $ok = $true; break }
           Write-Event 'slot-attempt' @{ slot = $n; attempt = $attempt; ok = $false; reason = $r.reason }
           Write-Host ('slot ' + $n + ' attempt ' + $attempt + ' failed: ' + $r.reason)
@@ -1307,7 +1310,9 @@ function Invoke-Daemon {
           $fails[$n] = [int]$fails[$n] + 1
           $alive = Test-SlotProcess $s
           # A restart gives the slot a new exit IP under whoever is using it, so one lost trace on a
-          # live tunnel only marks it degraded; the second consecutive failure rebuilds it.
+          # live tunnel only marks it degraded; the second consecutive failure rebuilds it. The
+          # rebuild is what clears a stalled UDP path (handshake sent, never answered): wireproxy
+          # keeps retrying from the same source port forever, a new process gets a new one.
           $hard = (-not $alive) -or ($m.reason -eq 'warp off') -or ($m.reason -eq 'port closed') -or ($m.reason -eq 'ipv4 egress')
           if (-not $hard -and $fails[$n] -lt 2) {
             $s.health = 'degraded'
