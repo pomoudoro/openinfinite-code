@@ -92,13 +92,70 @@ Opções: `INSTALAR.bat -Sim` (responde sim a tudo) · `INSTALAR.bat -SemDepende
 
 ## 🌐 Pool de egress (WPOOL)
 
-O pool cria **N túneis WARP** com **um proxy local por slot**: cada instância sai pelo seu próprio proxy/IP. Como o IPv4 free do WARP é CGNAT compartilhado, o pool usa **IPv6 por device** para dar uma saída distinta a cada slot.
+O pool cria **N túneis WARP** com **um proxy local por slot**: cada instância sai pelo seu próprio proxy/IP. Ele é o provider por trás de `EGRESS=WIREGUARD`, não um novo modo de egress.
 
-Ligue com `WPOOL_ENABLE=1` e `WPOOL_COUNT` no *Settings* (ou no `config.json`) e reinicie o launcher: ele sobe o pool e faz **claim / rotate / release** por janela automaticamente.
+### Como funciona
 
-Na mão: `powershell -File warp-pool.ps1 -Action up|status|rotate|down` (use `-State "$env:LOCALAPPDATA\opencode-infinite"` para apontar outro diretório). No dispatcher: `powershell -File multi-dispatcher.ps1 -Pool on -Count N`.
+- Cada slot tem identidade wgcf própria, um `wireproxy` e um proxy HTTP local na porta `WPOOL_PORT_BASE + número do slot` (slot 1 usa `base+1`).
+- O IPv4 free do WARP é CGNAT compartilhado: todos os devices saem pelo mesmo IPv4. O pool usa o **IPv6 por device** para distinguir as saídas; por isso um slot só é aceito se o trace retornar IPv6 e `warp=on`.
+- O perfil é normalizado com `::/0` no `AllowedIPs`, `DNS = 1.1.1.1` e peer literal `162.159.192.1:2408` (o hostname `engage.cloudflareclient.com` resolve AAAA primeiro e o handshake morre neste host).
+- O launcher é o provider de `EGRESS=WIREGUARD`: cada janela faz `claim` do menor slot livre, `rotate` só do seu slot e `release` ao fechar. O pool não mexe no Desktop nem em outros egress.
+- `pool\pool-status.json` guarda `up`, `distinct`, `portBase` e a tabela de slots; `claims\<instância>.json` guarda `instance/slot/port/proxy/ip/at`; `pool-config.json` fixa `portBase`/`count` para os comandos seguintes não trocarem de base.
+- O daemon checa saúde a cada `WPOOL_HEALTH_SEC`, recompõe slots mortos e chama `reap` por lease. `down` grava `stop.flag` para o daemon não ressuscitar os túneis.
+- **Limitação:** destino IPv4-only sai pelo IPv4 compartilhado (CGNAT); IP próprio por instância exige IPv6 no destino.
 
-**Limitação:** destino IPv4-only sai pelo IP compartilhado (CGNAT); para IP próprio por instância, o destino precisa falar IPv6.
+### Como rodar
+
+Ligue no Settings (grupo **Egress pool**): `WPOOL_ENABLE=1`, `WPOOL_COUNT=4`, `WPOOL_PORT_BASE=42000`, e escolha **WIREGUARD** como egress. Reinicie o launcher: o boot sobe `up` + `daemon` uma vez, com trava em `pool\startup.lock`. Os scripts ficam em `%LOCALAPPDATA%\opencode-infinite\` depois do instalador.
+
+Na mão:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File "%LOCALAPPDATA%\opencode-infinite\warp-pool.ps1" -Action status
+powershell ... -File warp-pool.ps1 -Action up -Count 4 -PortBase 42000
+powershell ... -File warp-pool.ps1 -Action claim -Instance janela01
+powershell ... -File warp-pool.ps1 -Action rotate -Slot 1
+powershell ... -File warp-pool.ps1 -Action down
+```
+
+Listar todas as ações: `up|status|claim|release|rotate|verify|down|daemon|reap`. `-State` aponta a raiz do estado (padrão: `%LOCALAPPDATA%\opencode-infinite`), `-Slot` escolhe o slot no `rotate` e no `down` parcial, `-Instance` identifica a janela no `claim`/`release`. `-Force` no `rotate` gera identidade nova em vez de só reconectar. `-AllowWarpTunnel` só em teste — em produção ele empilha WARP sobre WARP e o `up` se recusa se o `warp-cli` estiver Connected.
+
+Pool de CLIs em paralelo:
+
+```powershell
+powershell ... -File queue-add.ps1 -Prompt "resuma X"
+powershell ... -File multi-dispatcher.ps1 -Pool on -Count 4 -Drain
+```
+
+No dispatcher, `auto` desativa o pool se `up=0` (volta ao caminho antigo), `on` exige slots up e aborta se não houver, e `off` mantém o caminho antigo. Cada worker recebe `HTTP_PROXY`/`HTTPS_PROXY` próprios e `NO_PROXY=localhost,127.0.0.1`.
+
+### Testes
+
+Use `-State` apontando para `%TEMP%\wpool-teste` (nunca o estado real) e portas altas, ex.: `43500`, para não conflitar com o pool de produção.
+
+Sintaxe antes de qualquer coisa:
+
+```powershell
+$e=$null; [System.Management.Automation.Language.Parser]::ParseFile('warp-pool.ps1',[ref]$null,[ref]$e); $e.Count  # esperado: 0
+git diff --check   # esperado: EXIT=0
+```
+
+Sequência mínima:
+
+```powershell
+powershell ... -File warp-pool.ps1 -Action up -Count 2 -PortBase 43500 -State "$env:TEMP\wpool-teste"
+powershell ... -File warp-pool.ps1 -Action status -State "$env:TEMP\wpool-teste"
+```
+
+Espere uma tabela com 2 slots `up`, IPs IPv6 **distintos**, `warp=on` e, no `pool-status.json`, `up=2`, `distinct=2`, `portBase=43500`.
+
+Depois: `claim -Instance a1` e `claim -Instance a2` devem dar slots/portas distintos. `rotate -Slot 1` (sem `-PortBase`) mantém a porta, troca o IP e faz `claims\a1.json.ip` igualar `slot01\slot.json.ip`; o slot 2 fica intocado. O `status` deve levar segundos, não minutos (o trace tem teto de 8 s por slot).
+
+`down` → portas fechadas, nenhum `wireproxy` do teste vivo e `stop.flag` presente em `pool\`. Limpe `%TEMP%\wpool-teste` no fim.
+
+Dispatcher: `-DryRun -Pool off` com fila de 1 e de 2 itens deve processar cada id uma vez. Com um stub de pool (status e claims no `-State` de teste), `-Pool on` deve dar `HTTP_PROXY` distinto por worker e `NO_PROXY=localhost,127.0.0.1`.
+
+Se algo falhar, olhe `recovery-events.jsonl`, `pool\pool-status.json` e `instances\egress\slotNN\slot.json` (todos dentro de `-State`).
 
 ---
 
