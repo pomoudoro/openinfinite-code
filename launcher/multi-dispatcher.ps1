@@ -162,7 +162,8 @@ function Test-WorkerEgress {
   try {
     $ErrorActionPreference = 'Continue'
     # PS 5.1 drops an empty native argument, so --noproxy gets a host that never matches instead of ''.
-    $txt = & curl.exe -s --max-time 10 --noproxy 'none.invalid' -x $Proxy 'https://www.cloudflare.com/cdn-cgi/trace' 2>$null
+    # opencode.ai = the API host: a pass proves the API sees this worker's slot IP.
+    $txt = & curl.exe -s --max-time 10 --noproxy 'none.invalid' -x $Proxy 'https://opencode.ai/cdn-cgi/trace' 2>$null
     $ip = ''; $warp = ''
     foreach ($ln in @($txt)) {
       if ($ln -like 'ip=*') { $ip = $ln.Substring(3).Trim() }
@@ -174,15 +175,21 @@ function Test-WorkerEgress {
   finally { $ErrorActionPreference = $oldEa }
 }
 function Claim-PoolSlot {
-  param([string]$Instance)
-  for ($try = 1; $try -le 3; $try++) {
+  param([string]$Instance, [int]$Tries = 3)
+  for ($try = 1; $try -le $Tries; $try++) {
     $rc = Invoke-PoolScript -Action 'claim' -Instance $Instance
     $claim = $null
     if ($rc -eq 0) { $claim = Read-PoolClaim $Instance }
     if ($claim) { return $claim }
-    if ($try -lt 3) { Start-Sleep -Seconds 1 }
+    # 7 = every slot is taken: ask the pool for one more (up to WPOOL_MAX), then claim again.
+    if ($rc -eq 7) {
+      $g = Invoke-PoolScript -Action 'grow'
+      Emit 'worker_pool_grow' @{ worker=$Instance; exit=$g }
+      if ($g -eq 0) { continue }
+    }
+    if ($try -lt $Tries) { Start-Sleep -Seconds 1 }
   }
-  Emit 'worker_claim_failed' @{ worker=$Instance; pool=$Pool; tries=3 }
+  Emit 'worker_claim_failed' @{ worker=$Instance; pool=$Pool; tries=$Tries }
   return $null
 }
 function Release-PoolClaims {
@@ -295,16 +302,17 @@ try {
       $item = $queued[0]
       if ($queued.Count -gt 1) { $queued = $queued[1..($queued.Count-1)] } else { $queued = @() }
       if ($PoolActive -and -not $w.claimed) {
-        $bad = [Array]::FindIndex($items, [Predicate[object]]{ param($x) $x.id -eq $item.id })
-        if ($bad -ge 0) {
-          $items[$bad].status = 'failed_other'
-          $items[$bad].retries = [int]($items[$bad].retries) + 1
-          $items[$bad] | Add-Member -NotePropertyName last_worker -NotePropertyValue $k -Force
-          $items[$bad] | Add-Member -NotePropertyName last_exit -NotePropertyValue $null -Force
-          Write-Queue $items
+        # Plan item 4: a worker without a slot tries again now (the pool may have freed or grown
+        # one). Still none -> the item stays queued for the next poll; v2.62.0 marked it
+        # failed_other and it never ran again.
+        $claim = Claim-PoolSlot $k 1
+        if ($claim) {
+          $w['claimed'] = $true; $w['slot'] = [int]$claim.slot; $w['proxy'] = [string]$claim.proxy; $w['ip'] = [string]$claim.ip
+          Emit 'worker_claimed' @{ worker=$k; slot=[int]$claim.slot; ip=[string]$claim.ip; late=$true }
+        } else {
+          Emit 'worker_waiting_slot' @{ worker=$k; id=$item.id; pool=$Pool }
+          continue
         }
-        Emit 'worker_skipped_no_proxy' @{ worker=$k; id=$item.id; pool=$Pool }
-        continue
       }
       $w.item = $item
       $w.outFile = Join-Path $w.inst.out ('run-' + $item.id + '.out')

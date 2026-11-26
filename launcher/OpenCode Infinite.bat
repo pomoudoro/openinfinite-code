@@ -3,7 +3,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 set "OC_QUITTING="
 title opencode-infinity
 REM ============================================================
-REM  OpenCode launcher  (v2.62.1)
+REM  OpenCode launcher  (v2.63.0)
 REM  Multi-egress (WARP / TOR / free HTTP) + dependency bootstrap
 REM  + auto-resume.
 REM  v2.22 - v2.29: every fixed bug carries an inline "REM v2.2x:"
@@ -288,6 +288,10 @@ set "WPOOL_VERIFY_PROBE=0"
 set "WPOOL_WG_DIR="
 REM v2.62.1: 1 = the pool may run inside a connected WARP client (measured: each slot still gets its own IPv6). 0 = up refuses with exit 6.
 set "WPOOL_ALLOW_WARP_TUNNEL=1"
+REM v2.63: a window that finds every slot taken grows the pool up to this many slots.
+set "WPOOL_MAX=8"
+REM v2.63: 64 = exits that share the first 64 bits of the IPv6 count as one (dedupe, burned). 0 = full address.
+set "WPOOL_DEDUPE_PREFIX=0"
 REM v2.36: 1 = a fresh start continues the newest chat of the folder while it is still empty.
 set "REUSE_EMPTY=1"
 REM v2.36: 1 = after opencode closes, the last messages of the chat are printed so they stay in the scroll-back.
@@ -833,6 +837,12 @@ set "T_387=   OpenCode CLI is not installed. Install it now? [Y/N]: "
 set "T_388=  OpenCode CLI was not installed. Run the launcher again and answer Y, or install it by hand."
 set "T_389=  WARP is stopped or disabled. Turning it on needs administrator rights, which this script never asks for. Start the WARP service yourself, or run this script as administrator."
 set "T_390=  VPN Gate uses OpenVPN, which needs administrator rights. This script never asks for them: run it as administrator to use VPN Gate."
+REM v2.63: egress pool messages.
+set "T_391=  [pool] every tunnel is in use by another window; adding one more..."
+set "T_392=  [pool] waiting up to a minute for a tunnel to free up..."
+set "T_393=%%C_WARN%%  [pool] no tunnel free: this window uses WARP instead ^(never the direct IP^).%%C_RST%%"
+set "T_394=%%C_WARN%%  [window] the Desktop app is already open in another window: this window opens OpenCode in the terminal ^(CLI^), with its own tunnel.%%C_RST%%"
+set "T_395=  [pool] preparing the tunnels ^(the first time can take up to 2 minutes^)..."
 REM Batch messages are translated from lang\<code>.json; the UI writes lang\messages.txt (data only).
 set "OC_TUI=mki18n"
 set "OC_STATE=%STATE_DIR%"
@@ -940,6 +950,8 @@ call :numcfg WPOOL_LEASE_MIN 15 1440
 call :numcfg WPOOL_BURNED_TTL_HOURS 24
 call :numcfg0 WPOOL_VERIFY_PROBE 0
 call :numcfg0 WPOOL_ALLOW_WARP_TUNNEL 1 1
+call :numcfg WPOOL_MAX 8 16
+call :numcfg0 WPOOL_DEDUPE_PREFIX 0 64
 
 REM Create the state folder if it is missing, then check the single-instance lock.
 if not exist "%STATE_DIR%" mkdir "%STATE_DIR%" >nul 2>&1
@@ -961,7 +973,7 @@ REM path) would reach launcher.log in clear and the support report masks no free
 set "LOG_ARGS=redacted"
 set "LOG_OSV="
 for /f "tokens=*" %%v in ('ver') do if not defined LOG_OSV set "LOG_OSV=%%v"
-call :log "start v2.62.1 args=[%LOG_ARGS%] cwd=%CD% arch=%PROCESSOR_ARCHITECTURE% %LOG_OSV%" boot
+call :log "start v2.63.0 args=[%LOG_ARGS%] cwd=%CD% arch=%PROCESSOR_ARCHITECTURE% %LOG_OSV%" boot
 REM v2.30: one official copy. Setup copies this file to STATE_DIR\app and the opencode
 REM command runs that copy. A duplicate (a second download, "(1)") hands over to it, or
 REM replaces it when it is the newer one.
@@ -2056,6 +2068,10 @@ goto :eof
 REM Launch step. Checks the egress first, then starts opencode.
 :run
 call :token_guard
+REM v2.63: the Desktop app runs once per machine. A second launcher window in Desktop mode only
+REM focused that app and restarted its shared service on this window's proxy, so both windows
+REM ended on one IP. That window now opens OpenCode in the terminal instead, on its own tunnel.
+if /i "%APP_MODE%"=="DESKTOP" call :desktop_busy
 REM v2.60 (A3): auto skips the start banner; its short messages come from :asay.
 if defined OPT_AUTO goto :run_auto
 echo.
@@ -2131,6 +2147,16 @@ if errorlevel 1 goto :run_vpn_fail
 call :export_proxy_active
 goto :run_gate_ok
 :run_vpn_fail
+REM v2.63: no pool slot free (VPN_STATUS=NOSLOT): this window goes out through WARP, never direct.
+if /i not "%VPN_STATUS%"=="NOSLOT" goto :run_vpn_fail_ask
+if not defined WARP goto :run_vpn_fail_ask
+call echo %T_393%
+call :log "warp pool: no free slot; this window uses the WARP egress instead" vpn
+set "EGRESS=WARP"
+REM A private server here too, or this window's restart of the shared service would move the Desktop to WARP.
+if /i not "%APP_MODE%"=="DESKTOP" if defined CAP_STANDALONE set "OC_PRIVATE_SRV=1"
+goto :run
+:run_vpn_fail_ask
 call :yn "   Continue direct? [Y/N]: "
 if errorlevel 2 goto :menu_loop
 goto :run_noproxy
@@ -2170,6 +2196,8 @@ REM egress URL in use differs from the one it was last restarted on,
 REM which covers every mode and every proxy change.
 REM v1 has no shared service: skip the restart there.
 if not defined CAP_SERVICE goto :run_marked
+REM v2.63: a window with its own --standalone server leaves the shared service (the Desktop's) alone.
+if defined OC_PRIVATE_SRV goto :run_marked
 if not defined ACTIVE_PROXY goto :run_marked
 if /i "%ACTIVE_PROXY%"=="%SVC_PROXIED%" goto :run_marked
 call "%OC_CMD%" service restart >nul 2>&1
@@ -2202,6 +2230,7 @@ set "ACTIVE_PROXY="
 REM v2.23: a v2 service born under a proxy keeps the old tunnel's sockets.
 REM Coming back to NONE restarts it once, then forgets the proxy it had.
 if not defined SVC_PROXIED goto :run_launch
+if defined OC_PRIVATE_SRV goto :run_launch
 if defined CAP_SERVICE if defined OC_CMD call "%OC_CMD%" service restart >nul 2>&1
 set "SVC_PROXIED="
 
@@ -2897,6 +2926,7 @@ REM v2.25: the restart used to run on the user's own env (the probe had just
 REM restored it), so the new service was born DIRECT and every later request
 REM left on the real IP. The WARP proxy env is exported around it now.
 if not defined CAP_SERVICE goto :rg_svc_done
+if defined OC_PRIVATE_SRV goto :rg_svc_done
 if not defined OC_CMD goto :rg_svc_done
 call :export_proxy
 call "%OC_CMD%" service restart >nul 2>&1
@@ -3557,6 +3587,7 @@ set "VPN_TOOL="
 set "VPN_DIR="
 set "VPN_PORT="
 if exist "%STATE_DIR%\vpn_result.txt" del /f /q "%STATE_DIR%\vpn_result.txt" >nul 2>&1
+set "OC_PRIVATE_SRV="
 REM v2.62: a pooled window claims one slot and rotates only its own; the old path starts at :vpn_run_nopool.
 if /i not "%WPOOL_ENABLE%"=="1" goto :vpn_run_nopool
 if /i not "%EGRESS%"=="WIREGUARD" goto :vpn_run_nopool
@@ -3568,7 +3599,37 @@ if not exist "%OC_POOL_STATE%\warp-pool.ps1" goto :vpn_run_nopool
 if /i "%~1"=="status" goto :vpn_run_pool_status
 if /i not "%~1"=="switch" goto :vpn_run_nopool
 "%PSX%" -NoProfile -Command "& '%OC_POOL_STATE%\warp-pool.ps1' claim -Instance '%OC_SID%' -State '%OC_POOL_STATE%'" >nul 2>&1
-if errorlevel 1 goto :vpn_run_nopool
+if not errorlevel 1 goto :vpn_run_pool_claimed
+REM v2.63: exit 7 = every slot is taken by other windows. The window asks the pool for one more slot
+REM (up to WPOOL_MAX), then waits about a minute for one to free up. v2.62 fell to the old WireGuard
+REM path here, which has no .conf files and ended in "continue direct?" on the home IP.
+if not errorlevel 7 goto :vpn_run_nopool
+call echo %T_391%
+call :log "warp pool: every slot is taken; growing the pool (max %WPOOL_MAX%)" vpn
+"%PSX%" -NoProfile -Command "& '%OC_POOL_STATE%\warp-pool.ps1' grow -Max %WPOOL_MAX% -State '%OC_POOL_STATE%'" >nul 2>&1
+set /a OC_WPCW=0
+:vpn_run_pool_wait
+"%PSX%" -NoProfile -Command "& '%OC_POOL_STATE%\warp-pool.ps1' claim -Instance '%OC_SID%' -State '%OC_POOL_STATE%'" >nul 2>&1
+if not errorlevel 1 goto :vpn_run_pool_claimed
+if not errorlevel 7 goto :vpn_run_nopool
+set /a OC_WPCW+=1
+if %OC_WPCW% GEQ 12 goto :vpn_run_pool_noslot
+if "%OC_WPCW%"=="1" call echo %T_392%
+ping -n 6 127.0.0.1 >nul
+goto :vpn_run_pool_wait
+:vpn_run_pool_noslot
+call :log "warp pool: no slot freed up within a minute (max %WPOOL_MAX% reached)" vpn
+set "VPN_STATUS=NOSLOT"
+set "VPN_IP="
+set "VPN_LOC="
+set "VPN_NAME=POOL"
+set "VPN_TRIED=1"
+set "VPN_TOOL=POOL"
+set "VPN_DIR=%OC_POOL_STATE%"
+set "VPN_PORT=0"
+call :vpn_pool_write
+exit /b 1
+:vpn_run_pool_claimed
 call :vpn_pool_read
 if errorlevel 1 goto :vpn_run_nopool
 "%PSX%" -NoProfile -Command "& '%OC_POOL_STATE%\warp-pool.ps1' rotate -Slot %OC_POOL_SLOT% -State '%OC_POOL_STATE%'" >nul 2>&1
@@ -3603,6 +3664,11 @@ set "VPN_PORT=0"
 call :vpn_pool_write
 exit /b 1
 :vpn_run_pool_ok
+REM v2.63: a CLI window on a pool slot runs OpenCode with --standalone: a private server born with
+REM THIS slot's proxy. Without it every window restarted the one shared background service with
+REM its own proxy, so the last window to start took the IP of all the others (and of the Desktop).
+REM The Desktop keeps the shared service; only one window can be in Desktop mode (:desktop_busy).
+if /i not "%APP_MODE%"=="DESKTOP" if defined CAP_STANDALONE set "OC_PRIVATE_SRV=1"
 set "VPN_STATUS=OK"
 set "VPN_TOOL=POOL"
 set "VPN_TRIED=1"
@@ -3665,6 +3731,22 @@ set "WG_DIR_SHOW=%WG_DIR%"
 if not defined WG_DIR_SHOW set "WG_DIR_SHOW=%STATE_DIR%\wireguard"
 goto :eof
 
+REM v2.63: sets APP_MODE=CLI when another launcher window already has the Desktop app open. That
+REM window recorded the app in its own oc_launched.pid (pid + start ticks), so a recycled pid or a
+REM Desktop opened by hand never counts. Only with MULTI_INSTANCE=1: one window keeps the old flow.
+:desktop_busy
+if /i not "%MULTI_INSTANCE%"=="1" goto :eof
+if not defined OC_CMD goto :eof
+set "OC_DBUSY="
+set "OC_BASEST=%BASE_STATE%"
+if not defined OC_BASEST set "OC_BASEST=%STATE_DIR%"
+for /f "usebackq delims=" %%i in (`%PSX% -NoProfile -Command "$me=[IO.Path]::GetFullPath($env:STATE_DIR).TrimEnd([char]92); $b=$env:OC_BASEST; $f=@(Join-Path $b 'oc_launched.pid'); $d=Join-Path $b 'instances'; if(Test-Path -LiteralPath $d){ foreach($x in @(Get-ChildItem -LiteralPath $d -Directory -ErrorAction SilentlyContinue)){ $f+=(Join-Path $x.FullName 'oc_launched.pid') } }; foreach($x in $f){ try{ if(-not (Test-Path -LiteralPath $x)){ continue }; if(([IO.Path]::GetFullPath((Split-Path -Parent $x))).TrimEnd([char]92) -ieq $me){ continue }; $t=([IO.File]::ReadAllText($x)).Trim() -split '\s+'; $p=Get-Process -Id ([int]$t[0]) -ErrorAction Stop; if(($p.ProcessName -ieq 'OpenCode') -and ([string]$p.StartTime.Ticks -eq $t[1])){ [Console]::Out.Write('1'); break } }catch{} }"`) do set "OC_DBUSY=%%i"
+if not "%OC_DBUSY%"=="1" goto :eof
+call echo %T_394%
+call :log "desktop app already open in another launcher window; this window runs in CLI mode" menu
+set "APP_MODE=CLI"
+goto :eof
+
 REM v2.62: boot the shared WARP egress pool. With WPOOL_ENABLE=0 nothing here runs.
 REM The daemon is shared by every window; it is never stopped on window close (-Action down is manual).
 :wpool_start
@@ -3678,12 +3760,16 @@ set "OC_WPUP=0"
 if exist "%OC_WPSTATUS%" for /f "usebackq delims=" %%i in (`%PSX% -NoProfile -Command "try{ $s=[IO.File]::ReadAllText($env:OC_WPSTATUS) | ConvertFrom-Json -ErrorAction Stop; [Console]::Out.Write([int]$s.up) }catch{ [Console]::Out.Write(0) }"`) do set "OC_WPUP=%%i"
 if not "%OC_WPUP%"=="0" goto :wpool_daemon_only
 :wpool_up
-REM One hidden PowerShell holds startup.lock for the lifetime of the daemon; a second window exits at once.
+REM The boot process holds startup.lock for the lifetime of the daemon; a second window exits at once.
 REM v2.62.1: up's exit code goes to pool\up.rc so the wait below stops at once on a failed up. The daemon
 REM also runs after exit 2 (a collision left) and 3 (no slot up yet): those are the cases it repairs.
 REM Exit 6 (WARP client connected with WPOOL_ALLOW_WARP_TUNNEL=0) and 1/4 (error, lock) start no daemon.
 del /f /q "%OC_POOL_STATE%\pool\up.rc" >nul 2>&1
-start "" /b "%PSX%" -NoProfile -Command "$st=$env:OC_POOL_STATE; $lk=Join-Path (Join-Path $st 'pool') 'startup.lock'; $h=$null; try{ $h=[IO.File]::Open($lk,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }catch{ exit 0 }; try{ $sc=Join-Path $st 'warp-pool.ps1'; $rc=1; try{ & $sc -Action up -Count ([int]$env:WPOOL_COUNT) -PortBase ([int]$env:WPOOL_PORT_BASE) -HealthSec ([int]$env:WPOOL_HEALTH_SEC) -LeaseMin ([int]$env:WPOOL_LEASE_MIN) -BurnedTtlHours ([int]$env:WPOOL_BURNED_TTL_HOURS) -DedupeTries ([int]$env:WPOOL_DEDUPE_TRIES) -State $st | Out-Null; $rc=$LASTEXITCODE }catch{ $rc=1 }; try{ [IO.File]::WriteAllText((Join-Path (Join-Path $st 'pool') 'up.rc'), [string]$rc) }catch{}; if(@(0,2,3) -contains $rc){ & $sc -Action daemon -State $st -HealthSec ([int]$env:WPOOL_HEALTH_SEC) | Out-Null } } finally { if($h){ $h.Dispose() } }" >nul 2>&1
+REM v2.63: boot = up + up.rc + daemon, started by warp-pool.ps1 -Action spawn as a detached process (no console,
+REM no inherited handles). v2.62 ran it with start /b inside this console, so closing the window that booted
+REM the pool killed the daemon and nothing repaired the tunnels until the next launch.
+"%PSX%" -NoProfile -ExecutionPolicy Bypass -File "%OC_POOL_STATE%\warp-pool.ps1" -Action spawn -Then boot -State "%OC_POOL_STATE%" -Count %WPOOL_COUNT% -PortBase %WPOOL_PORT_BASE% -HealthSec %WPOOL_HEALTH_SEC% -LeaseMin %WPOOL_LEASE_MIN% -BurnedTtlHours %WPOOL_BURNED_TTL_HOURS% -DedupeTries %WPOOL_DEDUPE_TRIES% >nul 2>&1
+if not defined OPT_QUIET call echo %T_395%
 set /a OC_WPWAIT=0
 :wpool_wait
 set "OC_WPUP=0"
@@ -3692,6 +3778,10 @@ if not "%OC_WPUP%"=="0" goto :wpool_ready
 if exist "%OC_POOL_STATE%\pool\up.rc" goto :wpool_failed
 set /a OC_WPWAIT+=1
 if %OC_WPWAIT% GEQ 60 goto :wpool_slow
+REM v2.63: show how far the first boot is (pool\up-progress.json: done/total).
+set /a OC_WPMOD=OC_WPWAIT %% 10
+set "OC_WPPROG=%OC_POOL_STATE%\pool\up-progress.json"
+if "%OC_WPMOD%"=="0" if exist "%OC_WPPROG%" for /f "usebackq delims=" %%i in (`%PSX% -NoProfile -Command "try{ $p=[IO.File]::ReadAllText($env:OC_WPPROG) | ConvertFrom-Json; [Console]::Out.Write([string]$p.done + [char]47 + [string]$p.total) }catch{}"`) do echo   [pool] %%i
 ping -n 2 127.0.0.1 >nul
 goto :wpool_wait
 :wpool_ready
@@ -3700,7 +3790,7 @@ goto :wpool_egress_note
 :wpool_failed
 set "OC_WPRC="
 set /p OC_WPRC=<"%OC_POOL_STATE%\pool\up.rc"
-call :log "warp pool: up exited %OC_WPRC% with no slot up (6 = WARP client connected and WPOOL_ALLOW_WARP_TUNNEL=0); continuing on the old egress" boot
+call :log "warp pool: up exited %OC_WPRC% with no slot up (6 = WARP app in tunnel mode and WPOOL_ALLOW_WARP_TUNNEL=0); continuing on the old egress" boot
 goto :eof
 :wpool_slow
 call :log "warp pool: startup still pending; continuing on the old egress" boot
@@ -3711,7 +3801,7 @@ REM Tor or a proxy list keeps its own egress, so say so instead of leaving the u
 if /i not "%OC_EGRESS_DEFAULT%"=="WIREGUARD" call :log "warp pool: slots are up, but the default egress is %OC_EGRESS_DEFAULT%; only a WireGuard window takes a pool slot" boot
 goto :eof
 :wpool_daemon_only
-start "" /b "%PSX%" -NoProfile -Command "& '%OC_POOL_STATE%\warp-pool.ps1' -Action daemon -State '%OC_POOL_STATE%' -HealthSec %WPOOL_HEALTH_SEC%" >nul 2>&1
+"%PSX%" -NoProfile -ExecutionPolicy Bypass -File "%OC_POOL_STATE%\warp-pool.ps1" -Action spawn -Then daemon -State "%OC_POOL_STATE%" -HealthSec %WPOOL_HEALTH_SEC% >nul 2>&1
 call :log "warp pool: slots already up, daemon ensured" boot
 goto :wpool_egress_note
 
@@ -3791,6 +3881,7 @@ if /i "%VPN_STATUS%"=="NOCONF" goto :vpn_r_noconf
 if /i "%VPN_STATUS%"=="NOLIST" goto :vpn_r_nolist
 if /i "%VPN_STATUS%"=="NOIP" goto :vpn_r_noip
 if /i "%VPN_STATUS%"=="NOADMIN" goto :vpn_r_noadmin
+if /i "%VPN_STATUS%"=="NOSLOT" exit /b 1
 if "%VPN_TRIED%"=="0" goto :vpn_r_none
 call echo %T_290%
 exit /b 1
@@ -3815,6 +3906,7 @@ REM the shared background service holds the sockets of the old route: restart it
 REM v2.40: the restart ran on the user's env (no proxy) and :run_gate_ok skipped its own because the port
 REM never changes, so the WireGuard service left direct. Export around it, as :rotate_good does for WARP.
 if not defined CAP_SERVICE exit /b 0
+if defined OC_PRIVATE_SRV exit /b 0
 if not defined OC_CMD exit /b 0
 call :export_proxy_active >nul
 call "%OC_CMD%" service restart >nul 2>&1
@@ -4158,6 +4250,8 @@ REM Start opencode, save its PID to tui.pid, wait for it to exit, and return its
 call :ui_reset
 set "OC_EXE=%OC_CMD%"
 set "OC_FLAGS=%FLAGS%"
+REM v2.63: a CLI window on a pool slot opens its own server, born with this window's proxy.
+if /i not "%APP_MODE%"=="DESKTOP" if defined OC_PRIVATE_SRV set "OC_FLAGS=%FLAGS% --standalone"
 if /i not "%APP_MODE%"=="DESKTOP" goto :launch_go
 REM Desktop: no --continue (it is a CLI flag). A leftover app or sidecar was
 REM born without the proxy env and would keep the old egress, so close both.
@@ -5941,6 +6035,7 @@ REM sockets. v2 only: v1 has no shared service.
 REM v2.56 (N05): the marker is set only when the restart returned 0; a failed
 REM one clears it so the next pass retries.
 set "REMSVC=0"
+if defined OC_PRIVATE_SRV goto :rem_svc_done
 if defined CAP_SERVICE if defined OC_CMD if defined ACTIVE_PROXY call "%OC_CMD%" service restart >nul 2>&1
 if defined CAP_SERVICE if defined OC_CMD if defined ACTIVE_PROXY set "REMSVC=%ERRORLEVEL%"
 if not "%REMSVC%"=="0" goto :rem_svc_bad
@@ -6230,7 +6325,7 @@ REM - load config.env into this process; derived values follow the port
 REM N36: only the keys the launcher owns are taken from these files, so a
 REM hand-edited PATH, TEMP, STATE_DIR or COMSPEC cannot replace the environment
 REM of the running launcher.
-set "CFG_KEYS= AUTO_ROTATE CHAT_SNAPSHOT IP_FIND_MAX KEY_MENU KEY_QUIT KEY_ROTATE LIMIT_ACTION LIMIT_MODEL LIMIT_ROT_MAX LOG_ENABLED LOG_MASK_IP LOG_MAX_KB MENU_DEFAULT MULTI_INSTANCE OC_API_BASE OC_APP OC_EGRESS_DEFAULT OC_MODE_DEFAULT OC_MODEL OC_OTHER_WINDOW OCUI_COLOR OCUI_FONT OCUI_FONT_SIZE OCUI_ICONS OCUI_LANG OCUI_THEME ON_CLOSE POOL_ENABLE POOL_INTERVAL POOL_MAX PROBE PROBE_BROKEN_MAX PROBE_MODEL PROXY_API_CHECK PROXY_API_CHECK_URL PROXY_FIXED PROXY_LIST_MIN_BYTES PROXY_LIST_URL PROXY_PORT PROXY_PROBE_TIMEOUT PROXY_ROT_MAX PROXY_TRY_MAX QUOTA_RESUME RESUME_AUTO RESUME_MODE RESUME_MSG RESUME_TEXT RESUME_TIMEOUT REUSE_EMPTY ROTATE_COOLDOWN ROTATE_TRIES_MAX TARGET_COUNTRY TARGET_INTERVAL TARGET_MINUTES TARGET_PREFIX TARGET_TRIES TOR_AUTO_INSTALL TOR_BOOTSTRAP_WAIT TOR_HTTP_PORT TOR_SOCKS_PORT TYPE_AHEAD UI_ACC UI_COLOR UPDATE_ASK UPDATE_CHECK VPN_TIMEOUT VPNGATE_COUNTRY VPNGATE_MAX WARP_CALL_TIMEOUT WARP_WAIT WATCH WG_DIR WHERE_TIMEOUT WPOOL_ALLOW_WARP_TUNNEL WPOOL_BURNED_TTL_HOURS WPOOL_COUNT WPOOL_DEDUPE_TRIES WPOOL_ENABLE WPOOL_HEALTH_SEC WPOOL_LEASE_MIN WPOOL_PORT_BASE WPOOL_ROTATE_MODE WPOOL_VERIFY_PROBE WPOOL_WG_DIR "
+set "CFG_KEYS= AUTO_ROTATE CHAT_SNAPSHOT IP_FIND_MAX KEY_MENU KEY_QUIT KEY_ROTATE LIMIT_ACTION LIMIT_MODEL LIMIT_ROT_MAX LOG_ENABLED LOG_MASK_IP LOG_MAX_KB MENU_DEFAULT MULTI_INSTANCE OC_API_BASE OC_APP OC_EGRESS_DEFAULT OC_MODE_DEFAULT OC_MODEL OC_OTHER_WINDOW OCUI_COLOR OCUI_FONT OCUI_FONT_SIZE OCUI_ICONS OCUI_LANG OCUI_THEME ON_CLOSE POOL_ENABLE POOL_INTERVAL POOL_MAX PROBE PROBE_BROKEN_MAX PROBE_MODEL PROXY_API_CHECK PROXY_API_CHECK_URL PROXY_FIXED PROXY_LIST_MIN_BYTES PROXY_LIST_URL PROXY_PORT PROXY_PROBE_TIMEOUT PROXY_ROT_MAX PROXY_TRY_MAX QUOTA_RESUME RESUME_AUTO RESUME_MODE RESUME_MSG RESUME_TEXT RESUME_TIMEOUT REUSE_EMPTY ROTATE_COOLDOWN ROTATE_TRIES_MAX TARGET_COUNTRY TARGET_INTERVAL TARGET_MINUTES TARGET_PREFIX TARGET_TRIES TOR_AUTO_INSTALL TOR_BOOTSTRAP_WAIT TOR_HTTP_PORT TOR_SOCKS_PORT TYPE_AHEAD UI_ACC UI_COLOR UPDATE_ASK UPDATE_CHECK VPN_TIMEOUT VPNGATE_COUNTRY VPNGATE_MAX WARP_CALL_TIMEOUT WARP_WAIT WATCH WG_DIR WHERE_TIMEOUT WPOOL_ALLOW_WARP_TUNNEL WPOOL_BURNED_TTL_HOURS WPOOL_COUNT WPOOL_DEDUPE_TRIES WPOOL_ENABLE WPOOL_HEALTH_SEC WPOOL_LEASE_MIN WPOOL_MAX WPOOL_DEDUPE_PREFIX WPOOL_PORT_BASE WPOOL_ROTATE_MODE WPOOL_VERIFY_PROBE WPOOL_WG_DIR "
 if exist "%STATE_DIR%\ui.env" for /f "usebackq tokens=1* delims==" %%a in ("%STATE_DIR%\ui.env") do for %%k in (%CFG_KEYS%) do if /i "%%a"=="%%k" set "%%a=%%b"
 call :ui_style
 if not exist "%STATE_DIR%\config.env" goto :cfg_nums
@@ -6274,6 +6369,8 @@ call :numcfg WPOOL_LEASE_MIN 15 1440
 call :numcfg WPOOL_BURNED_TTL_HOURS 24
 call :numcfg0 WPOOL_VERIFY_PROBE 0
 call :numcfg0 WPOOL_ALLOW_WARP_TUNNEL 1 1
+call :numcfg WPOOL_MAX 8 16
+call :numcfg0 WPOOL_DEDUPE_PREFIX 0 64
 goto :eof
 
 REM - --help: the commands. Plain text, no setup needed.
@@ -7789,7 +7886,9 @@ $Schema = @(
   S 'WPOOL_PORT_BASE' 'Egress pool' 'First pool port' 'port' 42000 'Local port of the first slot; slot N uses base+N.' 'now'
   S 'WPOOL_HEALTH_SEC' 'Egress pool' 'Health check (s)' 'int' 30 'Seconds between checks of the pool daemon.' 'now' 5 600
   S 'WPOOL_LEASE_MIN' 'Egress pool' 'Claim lease (min)' 'int' 15 'A claim is freed as soon as the window or dispatcher that owns it closes. This lease only applies to claims made before v2.62.1, which name no owner process.' 'now' 1 1440
-  S 'WPOOL_ALLOW_WARP_TUNNEL' 'Egress pool' 'Pool inside WARP client' 'bool' 1 'On: the pool also runs while the WARP app is connected (each slot keeps its own IPv6). Off: the pool only starts with the WARP app disconnected.' 'next launch'
+  S 'WPOOL_ALLOW_WARP_TUNNEL' 'Egress pool' 'Pool inside WARP client' 'bool' 1 'On: the pool also starts while the WARP app is connected in tunnel mode. Proxy mode never conflicts with the pool. Off: the pool waits for the WARP app to leave tunnel mode.' 'next launch'
+  S 'WPOOL_MAX' 'Egress pool' 'Most tunnels' 'int' 8 'When every tunnel is taken, a new window adds one more, up to this number. Each tunnel uses about 65 MB.' 'now' 1 16
+  S 'WPOOL_DEDUPE_PREFIX' 'Egress pool' 'Compare IPs by range' 'enum' '0' '0 = two tunnels only clash on the same IP. 64 = they also clash when the IPv6 shares the first 64 bits. Use 64 if warp-pool.ps1 -Action stats says the limit follows the range.' 'now' 0 0 @('0', '64')
   S 'PROXY_LIST_URL' 'Proxy list' 'Proxy list source' 'listsrc' 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=protocolipport&format=text' 'URL or local file, any format (plain, CSV, JSON, XML, HTML).' 'now'
   S 'PROXY_LIST_MIN_BYTES' 'Proxy list' 'Minimum list size (bytes)' 'int' 20 'A downloaded list smaller than this is rejected. 0 = off.' 'now' 0 100000000
   S 'PROXY_TRY_MAX' 'Proxy list' 'Proxies tried per pick' 'int' 40 'How many untried proxies to test before giving up. Tested ones are skipped until the whole list was used.' 'now' 1 500
@@ -9529,7 +9628,7 @@ function New-Report {
   $total = 6
   & $A 'OpenCode Infinite - support report'
   & $A ('Generated   ' + (Get-Date).ToString('o'))
-  & $A 'Launcher    v2.62.1'
+  & $A 'Launcher    v2.63.0'
   & $A ('File        ' + $Self)
   try { $fi = Get-Item -LiteralPath $Self; & $A ('Size/date   ' + $fi.Length + ' bytes, ' + $fi.LastWriteTime.ToString('s')); & $A ('SHA-256     ' + (Get-FileHash -LiteralPath $Self -Algorithm SHA256).Hash) } catch { }
   & $A 'Personal data (user name, PC name, e-mails, tokens, passwords, and by default public IPs) is removed from this file. Read it before sharing.'
@@ -9724,7 +9823,7 @@ function Menu-Main {
     @{ L = ($script:I.back + ' Back'); C = 10; H = 'Return to the home screen.' },
     @{ L = ($script:I.err + ' Exit'); C = 6; H = 'Close the launcher.' })
   $head = Header-Lines
-  $r = Show-Menu 'OpenCode' $items ('v2.62.1   ' + $Repo) $head 0
+  $r = Show-Menu 'OpenCode' $items ('v2.63.0   ' + $Repo) $head 0
   if ($r -eq -1) { exit 10 }
   exit $items[$r].C
 }
@@ -9931,7 +10030,7 @@ function Home-Loop {
       $head += ''
     }
     if ($script:Notice) { $head += (P (Style $script:Notice[0]) ($script:I.warn + ' ' + (T $script:Notice[1]))); $head += ''; $script:Notice = $null }
-    $r = Show-Menu 'Main menu' $items ('v2.62.1   ' + $Self) $head $pos $true
+    $r = Show-Menu 'Main menu' $items ('v2.63.0   ' + $Self) $head $pos $true
     if ($r -eq -1) { continue }
     $pos = $r
     Log ('home -> ' + $acts[$r])
