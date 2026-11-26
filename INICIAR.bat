@@ -27,5 +27,20 @@ for %%F in ("OpenCode Infinite.bat" "resume-runner.ps1" "desktop-resume.ps1" "re
   )
 )
 
+REM Atalhos do pool e scripts ficam na raiz do estado, nao em app.
+set "STATEDIR=%LOCALAPPDATA%\opencode-infinite"
+for %%F in ("POOL.bat" "FILA.bat") do (
+  fc /b "%~dp0%%~F" "%STATEDIR%\%%~F" >nul 2>&1 || (
+    echo   atualizando %%~F na copia instalada...
+    copy /y "%~dp0%%~F" "%STATEDIR%\%%~F" >nul
+  )
+)
+for %%F in ("warp-pool.ps1" "multi-dispatcher.ps1" "queue-add.ps1" "device-reset.ps1") do (
+  fc /b "%SRC%\%%~F" "%STATEDIR%\%%~F" >nul 2>&1 || (
+    echo   atualizando %%~F na copia instalada...
+    copy /y "%SRC%\%%~F" "%STATEDIR%\%%~F" >nul
+  )
+)
+
 call "%APPBAT%" %*
 exit /b %errorlevel%

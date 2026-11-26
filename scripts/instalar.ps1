@@ -141,10 +141,11 @@ foreach ($f in $files) {
 Ok "copiado para $App"
 
 # Scripts do pool de egress: ficam na raiz de $State, nao em $App (e o dispatcher os chama por la).
-$poolFiles = @('warp-pool.ps1', 'multi-dispatcher.ps1', 'queue-add.ps1', 'device-reset.ps1')
+$poolFiles = @('warp-pool.ps1', 'multi-dispatcher.ps1', 'queue-add.ps1', 'device-reset.ps1', 'POOL.bat', 'FILA.bat')
 $poolCopiados = @()
 foreach ($f in $poolFiles) {
     $src = Join-Path $Launcher $f
+    if (-not (Test-Path -LiteralPath $src)) { $src = Join-Path $Root $f }
     if (-not (Test-Path -LiteralPath $src)) { continue }
     $dst = Join-Path $State $f
     if ((Test-Path -LiteralPath $dst) -and ((Get-FileHash -LiteralPath $dst).Hash -ne (Get-FileHash -LiteralPath $src).Hash)) {
