@@ -9802,7 +9802,7 @@ function Menu-Egress {
     @{ L = 'TOR'; V = ('bridge :' + $env:TOR_HTTP_PORT); H = 'Local Tor with a built-in HTTP bridge. A portable Tor is installed automatically if missing.' },
     @{ L = 'PROXY'; V = 'free list'; H = 'Free HTTP proxies from your list (any format) or the default one. Each is tested before use.' },
     @{ L = 'NONE'; V = 'direct'; H = 'No proxy: opencode uses your real connection and nothing is rotated.' },
-    @{ L = 'WIREGUARD'; V = 'wireproxy'; H = 'Your WireGuard .conf files through wireproxy, a local proxy that only opencode uses. Each switch takes the next file. No administrator prompt.' },
+    @{ L = 'WIREGUARD'; V = 'wireproxy'; H = 'WireGuard through wireproxy, a local proxy that only opencode uses. With the tunnel pool on, each window takes its own WARP tunnel and IP; otherwise your .conf files are used one after the other. No administrator prompt.' },
     @{ L = 'VPNGATE'; V = 'OpenVPN'; H = 'VPN Gate servers through OpenVPN. Only OpenCode''s hosts go through the tunnel. Needs a window that is already administrator: this script never asks for it.' })
   $head = @()
   if ($env:OC_H_FOLDER) { $head = @(('   ' + (P (Style 'dim') (Pad (T 'Folder') 9)) + (P (Style 'accent') $env:OC_H_FOLDER)), '') }

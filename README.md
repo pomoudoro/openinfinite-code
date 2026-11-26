@@ -4,6 +4,7 @@
 
 **OpenCode sem parar no limite grátis.**
 Bateu o limite? Troca o IP pelo Cloudflare WARP e o chat continua sozinho, no mesmo ponto.
+Quer várias conversas ao mesmo tempo, cada uma com o próprio IP? Ligue o **pool de túneis**.
 
 ![Windows](https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6?logo=windows&logoColor=white)
 ![OpenCode](https://img.shields.io/badge/OpenCode-Desktop%20%2B%20CLI-111111)
@@ -33,12 +34,43 @@ ou, sem Git: no GitHub, **Code → Download ZIP** e extraia a pasta (por exemplo
 > ### ✅ Caminho recomendado: `2 - 1 - 1`
 > | Tela | Escolha |
 > |---|---|
-> | Início | **[2] Launch OpenCode** |
+> | Início | **[2] Iniciar o OpenCode** |
 > | Conexão | **[1] WARP** |
-> | Menu | **[1] New IP and start OpenCode** |
+> | Menu | **[1] Nova IP e iniciar o OpenCode** |
 >
-> Use **2-1-1** e não 1-1-1. O `[1] Auto opencode` da tela inicial pula tudo e abre uma sessão nova; o `[2]` passa pela escolha da conexão e pega um IP novo antes de abrir o OpenCode Desktop, que é o caminho testado com a retomada automática.
+> Use **2-1-1** e não 1-1-1. O `[1] opencode automático` da tela inicial pula tudo e abre uma sessão nova; o `[2]` passa pela escolha da conexão e pega um IP novo antes de abrir o OpenCode Desktop, que é o caminho testado com a retomada automática.
 > O modo Desktop já vem salvo pelo instalador, por isso não aparece tela de modo nem de pasta (o próprio Desktop escolhe o projeto). Se o Desktop não estiver instalado, aparece a tela de modo antes da conexão.
+
+---
+
+## 🪟 Várias janelas, cada uma com o próprio IP (pool de túneis)
+
+Com o WARP normal, o PC inteiro tem **um** IP: quando uma conversa bate o limite, todas param até trocar. Com o pool, o launcher mantém vários túneis ao mesmo tempo (padrão: 4), cada um com um IP diferente. Cada janela pega o seu túnel, e quando ela bate o limite **só ela** troca de IP; as outras continuam.
+
+**Ligar (uma vez só):** abra o `INICIAR.bat` → **5. Definições** e ajuste:
+
+| Grupo | Opção | Valor |
+|---|---|---|
+| Ligação | Método de ligação | **WIREGUARD** |
+| Pool de túneis | Usar o pool de túneis | **Ativado** |
+| Pool de túneis | Túneis no pool | **4** (até 16) |
+| Inicialização | Várias janelas | **Ativado** |
+
+Feche e abra o `INICIAR.bat` de novo. Na primeira vez ele leva até ~2 minutos criando os túneis (mostra o progresso).
+
+**Usar:** `INICIAR.bat` → **2 - 5 - 1** (*Iniciar o OpenCode* → *WIREGUARD* → *Nova IP e iniciar o OpenCode*). Para outra conversa em paralelo, abra o `INICIAR.bat` de novo e repita. A primeira janela abre o app Desktop; as seguintes abrem o OpenCode no terminal (o Desktop só abre uma vez por máquina), cada uma no seu túnel.
+
+| Situação | O que acontece |
+|---|---|
+| Uma janela bate o limite grátis | Só o túnel dela troca de IP e o chat continua sozinho. |
+| Todos os túneis ocupados | A nova janela abre mais um túnel (até 8, opção *Máximo de túneis*); se não der, espera ~1 min e usa o WARP — nunca o IP direto da sua casa. |
+| Um túnel trava | O vigia percebe em segundos e reabre o túnel em outro servidor do Cloudflare. |
+| Você fecha uma janela | O túnel dela fica livre para a próxima. |
+
+**Atalhos:** `POOL.bat` (menu: ver o estado dos túneis, ligar, desligar, trocar o IP de um túnel) e `FILA.bat` (manda pedidos para rodarem sozinhos em paralelo, cada um no seu túnel: `FILA.bat "resuma o arquivo X"` e depois `FILA.bat dispatcher` dentro da pasta do projeto). Os dois ficam em `%LOCALAPPDATA%\opencode-infinite\`.
+
+> [!NOTE]
+> Os túneis do pool também são do Cloudflare WARP (identidades WireGuard próprias, criadas com o `wgcf`). A diferença é ter vários IPs ao mesmo tempo, separados do app WARP. > O limite grátis é do OpenCode: se um dia ele passar a valer por conta, e não por IP, o pool não ajuda.
 
 ---
 
@@ -48,6 +80,7 @@ ou, sem Git: no GitHub, **Code → Download ZIP** e extraia a pasta (por exemplo
 |---|---|---|
 | 🌐 | **WARP** | Cloudflare WARP em modo proxy, só para o OpenCode. O resto do PC (navegador, outros apps) continua na conexão normal. |
 | 🧠 | **DeepSeek V4.1 Flash Free (max)** | `opencode/deepseek-v4.1-flash-free#max` como modelo padrão do OpenCode e da retomada. |
+| 🪟 | **Pool de túneis** | Vários túneis WARP ao mesmo tempo, um IP por janela. Veja [Várias janelas](#-várias-janelas-cada-uma-com-o-próprio-ip-pool-de-túneis). |
 | 🔁 | **Retomada automática** | Quando aparece *"You've used today's free messages"*, o launcher troca o IP e manda no mesmo chat: **"voltamos, pode continuar e retomar de onde parou"**. Nunca envia a mesma mensagem duas vezes. |
 | 🎯 | **Orquestrador** | Agentes `orchestrator`, `builder`, `tester`, `reviewer`, `researcher`, `reverser`, `ask` e `debug`, instalados para todos os projetos. Veja [orchestrator/](orchestrator/README.md). |
 | 🤝 | **Bridge Claude Code** *(opcional)* | O Claude Code delega tarefas ao DeepSeek pelo OpenCode Infinite (MCP). Veja [claude-bridge/](claude-bridge/README.md). |
@@ -103,7 +136,7 @@ O pool cria **N túneis WARP** com **um proxy local por slot**: cada instância 
 - O launcher é o provider de `EGRESS=WIREGUARD`: cada janela faz `claim` do menor slot livre, `rotate` só do seu slot e `release` ao fechar.
 - **Uma janela = um servidor próprio (v2.63):** no modo CLI, a janela do pool abre o OpenCode com `--standalone`, um servidor privado nascido com o proxy do seu túnel, e nunca reinicia o serviço de fundo compartilhado. Antes, cada janela reiniciava esse serviço com o próprio proxy e a última a abrir levava todas (e o Desktop) para o seu IP.
 - **Desktop é um só (v2.63):** o app Desktop abre uma vez por máquina e fica com o serviço compartilhado. Com `MULTI_INSTANCE=1`, se outra janela do launcher já abriu o Desktop, a nova janela avisa e abre o OpenCode no terminal (CLI), com túnel próprio.
-- **Todos os túneis ocupados (v2.63):** a janela pede mais um túnel (`-Action grow`, até `WPOOL_MAX`, padrão 8) e espera até ~1 min por um livre. Se nada vagar, ela sai pelo **WARP**, nunca direto pelo IP de casa. A fila faz o mesmo: o pedido continua na fila em vez de virar `failed_other`. O pool não mexe no Desktop nem em outros egress — uma janela em WARP, Tor ou lista de proxies continua no seu egress (o `launcher.log` avisa: `only a WireGuard window takes a pool slot`).
+- **Todos os túneis ocupados (v2.63):** a janela pede mais um túnel (`-Action grow`, até `WPOOL_MAX`, padrão 8) e espera até ~1 min por um livre. Se nada vagar, ela sai pelo **WARP**, nunca direto pelo IP de casa. A fila faz o mesmo: o pedido continua na fila em vez de virar `failed_other`. Só janelas com o método **WIREGUARD** usam o pool; uma janela em WARP, Tor ou lista de proxies continua no seu egress (o `launcher.log` avisa: `only a WireGuard window takes a pool slot`).
 - **Dono do claim:** o claim registra o processo que ficou vivo (a janela `cmd.exe` do launcher ou o dispatcher), por PID + horário de início. Enquanto ele vive, o slot é dele; quando ele fecha, `reap` (ou o próximo `claim`) libera. `WPOOL_LEASE_MIN` só vale para claims antigos, sem dono registrado.
 - `pool\pool-status.json` guarda `up`, `distinct`, `portBase` e a tabela de slots; `pool\claims\<instância>.json` guarda `instance/slot/port/proxy/ip/owner`; `instances\<instância>\egress.json` diz por onde aquela instância sai; `pool-config.json` fixa `portBase`/`count` para os comandos seguintes não trocarem de base.
 - Cada `wireproxy` nasce destacado (sem herdar handles nem console, fora do job de quem chamou): fechar a janela que subiu o pool não derruba os slots, e quem chama o script por pipe não fica esperando.
@@ -119,7 +152,7 @@ O pool cria **N túneis WARP** com **um proxy local por slot**: cada instância 
 
 ### Como rodar
 
-Ligue no Settings (grupo **Egress pool**): `WPOOL_ENABLE=1`, `WPOOL_COUNT=4`, `WPOOL_PORT_BASE=42000`, e escolha **WIREGUARD** como egress. Reinicie o launcher: o boot sobe `up` + `daemon` uma vez, com trava em `pool\startup.lock`. Os scripts ficam em `%LOCALAPPDATA%\opencode-infinite\` depois do instalador.
+Ligue em **Definições** (grupo **Pool de túneis**, em inglês *Egress pool*): `WPOOL_ENABLE=1`, `WPOOL_COUNT=4`, `WPOOL_PORT_BASE=42000`, e escolha **WIREGUARD** em *Ligação → Método de ligação*. Para várias janelas, também `MULTI_INSTANCE=1` (*Várias janelas*). Reinicie o launcher: o boot sobe `up` + `daemon` uma vez, com trava em `pool\startup.lock`. Os scripts ficam em `%LOCALAPPDATA%\opencode-infinite\` depois do instalador.
 
 Na mão:
 
@@ -187,10 +220,13 @@ Se algo falhar, olhe `recovery-events.jsonl`, `pool\pool-status.json` e `instanc
 | Quero... | Faço |
 |---|---|
 | Abrir normalmente | `INICIAR.bat` → **2 - 1 - 1** |
+| Abrir com IP próprio, em paralelo (pool) | `INICIAR.bat` → **2 - 5 - 1**, uma vez por janela |
+| Ver os túneis e os IPs | `POOL.bat` → **1** |
+| Rodar pedidos sozinhos em paralelo | `FILA.bat "pedido"` e `FILA.bat dispatcher` |
 | Abrir num projeto específico | arraste a pasta do projeto em cima do `INICIAR.bat` |
 | Abrir pelo terminal | `opencodeinf` (criado no primeiro setup do launcher) |
-| Trocar o IP na mão | menu principal → *Change IP* |
-| Mudar a mensagem de retomada, o modelo etc. | menu → *Settings* |
+| Trocar o IP na mão | *Iniciar o OpenCode* → *Trocar IP (teste)* |
+| Mudar a mensagem de retomada, o modelo etc. | menu → **5. Definições** |
 
 **Quando o limite grátis chega:** o launcher detecta a mensagem, pega um IP novo no WARP, confere que o IP mudou e envia a mensagem de retomada no **mesmo chat** que parou. Você não precisa fazer nada.
 
@@ -200,14 +236,15 @@ Se algo falhar, olhe `recovery-events.jsonl`, `pool\pool-status.json` e `instanc
 
 | Configuração | Valor | Onde mudar |
 |---|---|---|
-| Conexão | `WARP` | Settings → Connection |
-| Modelo da retomada | `opencode/deepseek-v4.1-flash-free#max` | Settings → Session → Resume model |
-| Mensagem de retomada | `voltamos, pode continuar e retomar de onde parou` | Settings → Session |
-| Ação no limite | `rotate` (troca o IP e continua) | Settings → IP rotation |
+| Conexão | `WARP` (`WIREGUARD` para o pool) | Definições → Ligação → Método de ligação |
+| Pool de túneis | desligado, 4 túneis, máximo 8 | Definições → Pool de túneis |
+| Modelo da retomada | `opencode/deepseek-v4.1-flash-free#max` | Definições → Sessão → Modelo de retoma |
+| Mensagem de retomada | `voltamos, pode continuar e retomar de onde parou` | Definições → Sessão |
+| Ação no limite | `rotate` (troca o IP e continua) | Definições → Troca de IP |
 | O que cada erro faz | limite grátis → troca o IP · limite do provedor/créditos → pergunta · contexto/modelo → nada | `%LOCALAPPDATA%\opencode-infinite\patterns.conf` |
 | Idioma do OpenCode | qualquer um | — |
 | Atualização do launcher | desligada | — |
-| Idioma | português | Settings |
+| Idioma | português | Definições → Aparência |
 
 Os arquivos de estado ficam em `%LOCALAPPDATA%\opencode-infinite\` (`config.json`, `launcher.log`, `resume.err`).
 
@@ -235,7 +272,10 @@ Depois é só abrir o `INICIAR.bat`: ele percebe que os arquivos da pasta mudara
 | Desktop app aparece como *not installed* | Instale pelo <https://opencode.ai/download> e, no menu de modo, use *Detect the desktop app again*. |
 | Bateu o limite e o launcher **perguntou** em vez de trocar o IP | O seu `patterns.conf` é antigo. Rode o `INSTALAR.bat`: ele guarda um backup e volta aos padrões. |
 | Funciona com o OpenCode em português? | Sim. O launcher não lê o texto da tela: ele procura o código do erro (`provider.free-limit` / `Free usage limit reached`) no log e no banco do OpenCode, e isso é gravado em inglês em qualquer idioma da interface. |
-| Quero ver o que aconteceu | `%LOCALAPPDATA%\opencode-infinite\launcher.log` |
+| A janela do pool abriu no WARP | Todos os túneis estavam ocupados e o pool já estava no máximo. Feche uma janela ou aumente *Máximo de túneis*. |
+| *ECONNRESET* e "Attempt 2 - retrying" | Um túnel travou e o vigia o reabriu; o OpenCode tenta de novo sozinho em segundos. |
+| Quero ver os túneis | `POOL.bat` → 1, ou `%LOCALAPPDATA%\opencode-infinite\pool\pool-status.json` |
+| Quero ver o que aconteceu | `%LOCALAPPDATA%\opencode-infinite\launcher.log` (o pool grava em `recovery-events.jsonl`) |
 | Aparece pedido de atualização do launcher | Você está rodando uma cópia antiga: rode o `INSTALAR.bat` desta pasta. |
 | Rodei um `.bat` baixado do projeto original | Ele pode substituir a cópia instalada se tiver versão maior. Rode o `INSTALAR.bat` desta pasta de novo para voltar a esta versão. |
 
@@ -247,8 +287,14 @@ Depois é só abrir o `INICIAR.bat`: ele percebe que os arquivos da pasta mudara
 openinfinite-code/
 ├── INSTALAR.bat            instala / atualiza tudo
 ├── INICIAR.bat             abre o launcher (caminho 2-1-1)
+├── POOL.bat                menu do pool de túneis
+├── FILA.bat                fila de pedidos em paralelo
 ├── launcher/
 │   ├── OpenCode Infinite.bat   o launcher (WARP, rotação, retomada)
+│   ├── warp-pool.ps1           pool de túneis (wgcf + wireproxy)
+│   ├── multi-dispatcher.ps1    roda a fila, um túnel por worker
+│   ├── queue-add.ps1           põe pedidos na fila
+│   ├── device-reset.ps1        identidade separada por worker
 │   ├── resume-runner.ps1       retomada pela CLI
 │   ├── desktop-resume.ps1      retomada pelo serviço do Desktop
 │   ├── resume-target.py        acha o chat que bateu o limite
@@ -262,7 +308,7 @@ openinfinite-code/
 
 ## 🗒️ Versões
 
-### Launcher v2.63.0
+### Launcher v2.63.0 (atual)
 Pool WPOOL (`warp-pool.ps1` 1.2), as 8 correções do plano de revisão:
 
 - **Várias janelas, vários IPs de verdade:** janela CLI do pool usa `--standalone` (servidor próprio) e não reinicia mais o serviço compartilhado; o Desktop fica com ele.
@@ -311,7 +357,7 @@ Correções trazidas do projeto original (até a 2.60.28), sem mexer nas nossas 
 
 - **Limite grátis troca o IP sozinho já na primeira instalação:** antes, sem um `patterns.conf` pronto, o launcher criava um que só perguntava.
 
-A versão subiu para **2.61.0**, acima de qualquer 2.60.x do original, para um `.bat` deles não substituir a cópia instalada por ser "mais novo". A versão atual é **2.62.0**.
+A versão subiu para **2.61.0**, acima de qualquer 2.60.x do original, para um `.bat` deles não substituir a cópia instalada por ser "mais novo".
 
 ---
 
