@@ -65,6 +65,7 @@ Feche e abra o `INICIAR.bat` de novo. Na primeira vez ele leva até ~2 minutos c
 | Uma janela bate o limite grátis | Só o túnel dela troca de IP e o chat continua sozinho. |
 | Todos os túneis ocupados | A nova janela abre mais um túnel (até 8, opção *Máximo de túneis*); se não der, espera ~1 min e usa o WARP — nunca o IP direto da sua casa. |
 | Um túnel trava | O vigia percebe em segundos e reabre o túnel em outro servidor do Cloudflare. |
+| A troca cai numa faixa de IP "queimada" | O pool aprende: faixa cujos IPs batem o limite em segundos é recusada nas próximas trocas (veja abaixo). |
 | Você fecha uma janela | O túnel dela fica livre para a próxima. |
 
 **Atalhos:** `POOL.bat` (menu: ver o estado dos túneis, ligar, desligar, trocar o IP de um túnel) e `FILA.bat` (manda pedidos para rodarem sozinhos em paralelo, cada um no seu túnel: `FILA.bat "resuma o arquivo X"` e depois `FILA.bat dispatcher` dentro da pasta do projeto). Os dois ficam em `%LOCALAPPDATA%\opencode-infinite\`.
@@ -147,6 +148,7 @@ O pool cria **N túneis WARP** com **um proxy local por slot**: cada instância 
 - **Checagem no host da API (v2.63):** o trace do pool e o pré-voo da fila usam `https://opencode.ai/cdn-cgi/trace`, o mesmo host da API: um slot aprovado prova que o OpenCode vê o IP daquele túnel.
 - **Vigia destacado (v2.63):** o boot (`up` + `daemon`) nasce com `-Action spawn`, fora do console da janela. Fechar a janela que subiu o pool não derruba mais o vigia.
 - **Limite por IP ou por faixa? (v2.63):** cada rotação grava `pool\rotation-history.jsonl` com o `/64` do IP antigo e do novo e quanto tempo o antigo durou. `-Action stats` resume isso; se o limite voltar rápido na mesma faixa, ele sugere `WPOOL_DEDUPE_PREFIX=64` (dois túneis com o mesmo `/64` passam a contar como o mesmo IP).
+- **Famílias queimadas (v2.63.1):** medido em 26/11: IPs `2a09:bac5:…` duraram 8 a 22 min de uso, enquanto **todo** IP `2a09:bac1:…:36a8` (a faixa que o app WARP também entrega, compartilhada por muita gente) bateu o limite de novo em 10 s, e a janela ficava num loop de trocas a cada 10 s. Agora o launcher informa o motivo da troca (`-Reason quota|watcher`) e o pool guarda, por família (os primeiros 32 bits do IPv6), quantos IPs bateram o limite em menos de 2 min e quantos duraram 5 min ou mais (`poolamilies.json`). Família com 2+ quedas rápidas e nenhum sucesso nas últimas 2 h é **queimada**: a troca recusa esses IPs (até 4 reconexões trocando de endpoint, depois identidade nova), o `claim` entrega primeiro túneis de família boa e o `status` marca `(burned)`. Recusas aparecem como `exit-refused` em `recovery-events.jsonl`; `-Action stats` mostra a tabela de famílias.
 - **Limpeza (v2.63):** túneis acima da quantidade configurada são parados e apagados no `up`, a menos que uma janela viva ainda os use. A primeira subida mostra o progresso (`pool\up-progress.json`).
 - **Limitação:** destino IPv4-only sai pelo IPv4 compartilhado (CGNAT); IP próprio por instância exige IPv6 no destino (`opencode.ai` tem AAAA).
 
@@ -308,7 +310,10 @@ openinfinite-code/
 
 ## 🗒️ Versões
 
-### Launcher v2.63.0 (atual)
+### Launcher v2.63.1 (atual)
+- **Loop de 10 s no limite corrigido:** o pool aprende quais famílias de IP do WARP já chegam com o limite estourado (ex.: `2a09:bac1:…:36a8`) e não troca mais para elas; a troca desiste de um IP ruim em 2 medições em vez de esperar 20 s. `warp-pool.ps1` 1.3.
+
+### Launcher v2.63.0
 Pool WPOOL (`warp-pool.ps1` 1.2), as 8 correções do plano de revisão:
 
 - **Várias janelas, vários IPs de verdade:** janela CLI do pool usa `--standalone` (servidor próprio) e não reinicia mais o serviço compartilhado; o Desktop fica com ele.
