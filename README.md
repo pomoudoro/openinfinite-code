@@ -90,6 +90,18 @@ Opções: `INSTALAR.bat -Sim` (responde sim a tudo) · `INSTALAR.bat -SemDepende
 
 ---
 
+## 🌐 Pool de egress (WPOOL)
+
+O pool cria **N túneis WARP** com **um proxy local por slot**: cada instância sai pelo seu próprio proxy/IP. Como o IPv4 free do WARP é CGNAT compartilhado, o pool usa **IPv6 por device** para dar uma saída distinta a cada slot.
+
+Ligue com `WPOOL_ENABLE=1` e `WPOOL_COUNT` no *Settings* (ou no `config.json`) e reinicie o launcher: ele sobe o pool e faz **claim / rotate / release** por janela automaticamente.
+
+Na mão: `powershell -File warp-pool.ps1 -Action up|status|rotate|down` (use `-State "$env:LOCALAPPDATA\opencode-infinite"` para apontar outro diretório). No dispatcher: `powershell -File multi-dispatcher.ps1 -Pool on -Count N`.
+
+**Limitação:** destino IPv4-only sai pelo IP compartilhado (CGNAT); para IP próprio por instância, o destino precisa falar IPv6.
+
+---
+
 ## ▶️ Uso no dia a dia
 
 | Quero... | Faço |
@@ -170,6 +182,16 @@ openinfinite-code/
 
 ## 🗒️ Versões
 
+### Launcher v2.62.0
+O pool de egress WARP passou a fazer parte do launcher (os comentários do código usam `v2.62`):
+
+- **Pool de egress WARP por slot:** cada janela sai pelo seu próprio túnel, com proxy local e saída IPv6 própria — o IPv4 free do WARP é CGNAT compartilhado, então o IPv6 é o que distingue os slots.
+- **Chaves `WPOOL_*` no Settings:** `WPOOL_ENABLE`, `WPOOL_COUNT`, portas, lease e health check configuráveis pela interface; com o pool habilitado, ele sobe automaticamente no boot do launcher.
+- **Claim / rotate / release por janela:** cada instância faz claim, rotação e release apenas do seu slot, sem lock global; o fechamento libera o slot; uma claim órfã pode ser limpa com warp-pool.ps1 -Action reap depois do lease.
+- **`multi-dispatcher.ps1` com proxy por worker** e opção `-Pool on|off|auto` para escolher se cada worker usa o pool.
+- **Correção da fila com 1 item:** o dispatcher não travava mais quando a fila tinha um único item.
+- **Correção do claim após rotação:** depois da rotação, a janela passa a usar o novo IP/porta do seu slot em vez do claim antigo.
+
 ### Launcher v2.61.0
 Correções trazidas do projeto original (até a 2.60.28), sem mexer nas nossas personalizações:
 
@@ -183,7 +205,7 @@ Correções trazidas do projeto original (até a 2.60.28), sem mexer nas nossas 
 
 - **Limite grátis troca o IP sozinho já na primeira instalação:** antes, sem um `patterns.conf` pronto, o launcher criava um que só perguntava.
 
-A versão subiu para **2.61.0**, acima de qualquer 2.60.x do original, para um `.bat` deles não substituir a cópia instalada por ser "mais novo".
+A versão subiu para **2.61.0**, acima de qualquer 2.60.x do original, para um `.bat` deles não substituir a cópia instalada por ser "mais novo". A versão atual é **2.62.0**.
 
 ---
 

@@ -1,6 +1,6 @@
 # .bat/.cmd ficam com CRLF no repo: o cmd nao le batch so com LF.
-*.bat -text
-*.cmd -text
+*.bat -text whitespace=cr-at-eol
+*.cmd -text whitespace=cr-at-eol
 *.ps1 text eol=crlf
 *.sh  text eol=lf
 *.png binary

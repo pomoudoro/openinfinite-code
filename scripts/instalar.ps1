@@ -140,6 +140,21 @@ foreach ($f in $files) {
 }
 Ok "copiado para $App"
 
+# Scripts do pool de egress: ficam na raiz de $State, nao em $App (e o dispatcher os chama por la).
+$poolFiles = @('warp-pool.ps1', 'multi-dispatcher.ps1', 'queue-add.ps1', 'device-reset.ps1')
+$poolCopiados = @()
+foreach ($f in $poolFiles) {
+    $src = Join-Path $Launcher $f
+    if (-not (Test-Path -LiteralPath $src)) { continue }
+    $dst = Join-Path $State $f
+    if ((Test-Path -LiteralPath $dst) -and ((Get-FileHash -LiteralPath $dst).Hash -ne (Get-FileHash -LiteralPath $src).Hash)) {
+        Backup-Arquivo $dst
+    }
+    Copy-Item -LiteralPath $src -Destination $dst -Force
+    $poolCopiados += $f
+}
+if ($poolCopiados.Count -gt 0) { Ok ("copiado para {0}: {1}" -f $State, ($poolCopiados -join ', ')) }
+
 # Idiomas e temas ficam locais: o launcher baixaria do GitLab do projeto original na primeira execucao
 # (e cai para ingles quando o GitLab recusa). So preenche o que falta; nao troca copia existente.
 $batText = [IO.File]::ReadAllText((Join-Path $Launcher 'OpenCode Infinite.bat'))

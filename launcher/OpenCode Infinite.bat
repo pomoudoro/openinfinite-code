@@ -3,7 +3,7 @@ setlocal EnableExtensions DisableDelayedExpansion
 set "OC_QUITTING="
 title opencode-infinity
 REM ============================================================
-REM  OpenCode launcher  (v2.61.0)
+REM  OpenCode launcher  (v2.62.0)
 REM  Multi-egress (WARP / TOR / free HTTP) + dependency bootstrap
 REM  + auto-resume.
 REM  v2.22 - v2.29: every fixed bug carries an inline "REM v2.2x:"
@@ -275,6 +275,17 @@ REM v2.36: ask shows the OpenCode menu; 1, 2 or 3 runs that option at once (new 
 set "MENU_DEFAULT=ask"
 REM v2.36: 1 = a second launcher window runs on its own copy of the settings instead of stopping.
 set "MULTI_INSTANCE=0"
+REM v2.62: WARP egress pool (warp-pool.ps1). 1 = each window claims a tunnel with its own IPv6 exit.
+set "WPOOL_ENABLE=0"
+set "WPOOL_COUNT=4"
+set "WPOOL_PORT_BASE=42000"
+set "WPOOL_DEDUPE_TRIES=3"
+set "WPOOL_HEALTH_SEC=30"
+set "WPOOL_LEASE_MIN=15"
+set "WPOOL_BURNED_TTL_HOURS=24"
+set "WPOOL_ROTATE_MODE=reconnect"
+set "WPOOL_VERIFY_PROBE=0"
+set "WPOOL_WG_DIR="
 REM v2.36: 1 = a fresh start continues the newest chat of the folder while it is still empty.
 set "REUSE_EMPTY=1"
 REM v2.36: 1 = after opencode closes, the last messages of the chat are printed so they stay in the scroll-back.
@@ -918,9 +929,19 @@ set "OC_MODEL_CFG=%OC_MODEL%"
 call :numcfg TOR_BOOTSTRAP_WAIT 120
 REM v3.1 (N41): capped below the point where LOG_MAXB (KB*1024) overflows.
 call :numcfg LOG_MAX_KB 1024 2097151
+REM v2.62: WARP egress pool. WPOOL_VERIFY_PROBE may be 0 (off).
+call :numcfg WPOOL_COUNT 4 16
+call :numcfg WPOOL_PORT_BASE 42000 65535
+call :numcfg WPOOL_DEDUPE_TRIES 3
+call :numcfg WPOOL_HEALTH_SEC 30 600
+call :numcfg WPOOL_LEASE_MIN 15 1440
+call :numcfg WPOOL_BURNED_TTL_HOURS 24
+call :numcfg0 WPOOL_VERIFY_PROBE 0
 
 REM Create the state folder if it is missing, then check the single-instance lock.
 if not exist "%STATE_DIR%" mkdir "%STATE_DIR%" >nul 2>&1
+REM v2.62: bring the shared WARP pool up once, before the boot claim. No-op unless WPOOL_ENABLE=1.
+call :wpool_start
 set "OC_PATF=%STATE_DIR%\patterns.conf"
 REM v2.44: a missing patterns.conf is written with the defaults, so it can be edited.
 if not exist "%OC_PATF%" "%PSX%" -NoProfile -Command "try{ iex $env:OC_PLOAD; Set-Content -LiteralPath $env:OC_PATF -Encoding ASCII -Value @('# rotate= rotates, ask= asks first (once per 10 min), noop= never rotates. Regex alternatives joined by |, case-insensitive.', ('rotate=' + $rot), ('ask=' + $ask), ('noop=' + $nop)) }catch{}" >nul 2>&1
@@ -937,7 +958,7 @@ REM path) would reach launcher.log in clear and the support report masks no free
 set "LOG_ARGS=redacted"
 set "LOG_OSV="
 for /f "tokens=*" %%v in ('ver') do if not defined LOG_OSV set "LOG_OSV=%%v"
-call :log "start v2.61.0 args=[%LOG_ARGS%] cwd=%CD% arch=%PROCESSOR_ARCHITECTURE% %LOG_OSV%" boot
+call :log "start v2.62.0 args=[%LOG_ARGS%] cwd=%CD% arch=%PROCESSOR_ARCHITECTURE% %LOG_OSV%" boot
 REM v2.30: one official copy. Setup copies this file to STATE_DIR\app and the opencode
 REM command runs that copy. A duplicate (a second download, "(1)") hands over to it, or
 REM replaces it when it is the newer one.
@@ -3533,6 +3554,51 @@ set "VPN_TOOL="
 set "VPN_DIR="
 set "VPN_PORT="
 if exist "%STATE_DIR%\vpn_result.txt" del /f /q "%STATE_DIR%\vpn_result.txt" >nul 2>&1
+REM v2.62: a pooled window claims one slot and rotates only its own; the old path starts at :vpn_run_nopool.
+if /i not "%WPOOL_ENABLE%"=="1" goto :vpn_run_nopool
+if /i not "%EGRESS%"=="WIREGUARD" goto :vpn_run_nopool
+if not defined OC_SID goto :vpn_run_nopool
+if /i "%~1"=="stop" goto :vpn_run_nopool
+set "OC_POOL_STATE=%BASE_STATE%"
+if not defined OC_POOL_STATE set "OC_POOL_STATE=%STATE_DIR%"
+if not exist "%OC_POOL_STATE%\warp-pool.ps1" goto :vpn_run_nopool
+if /i "%~1"=="status" goto :vpn_run_pool_status
+if /i not "%~1"=="switch" goto :vpn_run_nopool
+"%PSX%" -NoProfile -Command "& '%OC_POOL_STATE%\warp-pool.ps1' claim -Instance '%OC_SID%' -State '%OC_POOL_STATE%'" >nul 2>&1
+if errorlevel 1 goto :vpn_run_nopool
+call :vpn_pool_read
+if errorlevel 1 goto :vpn_run_nopool
+"%PSX%" -NoProfile -Command "& '%OC_POOL_STATE%\warp-pool.ps1' rotate -Slot %OC_POOL_SLOT% -State '%OC_POOL_STATE%'" >nul 2>&1
+if errorlevel 1 goto :vpn_run_nopool
+call :vpn_pool_read
+if errorlevel 1 goto :vpn_run_nopool
+goto :vpn_run_pool_ok
+:vpn_run_pool_status
+if not exist "%OC_POOL_STATE%\pool\claims\%OC_SID%.json" goto :vpn_run_pool_noconf
+call :vpn_pool_read
+if errorlevel 1 goto :vpn_run_pool_noconf
+goto :vpn_run_pool_ok
+:vpn_run_pool_noconf
+set "VPN_STATUS=NOCONF"
+set "VPN_IP="
+set "VPN_LOC="
+set "VPN_NAME=POOL"
+set "VPN_TRIED=1"
+set "VPN_TOOL=POOL"
+set "VPN_DIR=%OC_POOL_STATE%"
+set "VPN_PORT=0"
+call :vpn_pool_write
+exit /b 1
+:vpn_run_pool_ok
+set "VPN_STATUS=OK"
+set "VPN_TOOL=POOL"
+set "VPN_TRIED=1"
+set "VPN_LOC=POOL"
+set "VPN_NAME=POOL"
+set "VPN_DIR=%OC_POOL_STATE%"
+call :vpn_pool_write
+exit /b 0
+:vpn_run_nopool
 if /i "%~1"=="switch" if /i "%EGRESS%"=="VPNGATE" if not defined OPT_AUTO call echo %T_390%
 set "OC_VPN_ACT=%~1"
 set "OC_STATE=%STATE_DIR%"
@@ -3552,10 +3618,73 @@ set "VPNRC=%errorlevel%"
 if exist "%STATE_DIR%\vpn_result.txt" for /f "usebackq tokens=1* delims==" %%a in ("%STATE_DIR%\vpn_result.txt") do set "VPN_%%a=%%b"
 exit /b %VPNRC%
 
+REM Reads this window's claim into VPN_PORT, VPN_IP and OC_POOL_SLOT (port|ip|slot).
+REM PSX stays unquoted inside for /f, as in :pool_take; ConvertFrom-Json works in PS 5.1.
+:vpn_pool_read
+set "VPN_PORT="
+set "VPN_IP="
+set "OC_POOL_SLOT="
+set "OC_CLAIM=%OC_POOL_STATE%\pool\claims\%OC_SID%.json"
+if not exist "%OC_CLAIM%" exit /b 1
+for /f "usebackq tokens=1,2,3 delims=|" %%A in (`%PSX% -NoProfile -Command "$c=Get-Content -LiteralPath $env:OC_CLAIM -Raw | ConvertFrom-Json; '{0}|{1}|{2}' -f $c.port,$c.ip,$c.slot"`) do (
+  set "VPN_PORT=%%A"
+  set "VPN_IP=%%B"
+  set "OC_POOL_SLOT=%%C"
+)
+if not defined VPN_PORT exit /b 1
+if not defined OC_POOL_SLOT exit /b 1
+exit /b 0
+
+:vpn_pool_write
+> "%STATE_DIR%\vpn_result.txt" echo STATUS=%VPN_STATUS%
+>>"%STATE_DIR%\vpn_result.txt" echo IP=%VPN_IP%
+>>"%STATE_DIR%\vpn_result.txt" echo LOC=%VPN_LOC%
+>>"%STATE_DIR%\vpn_result.txt" echo NAME=%VPN_NAME%
+>>"%STATE_DIR%\vpn_result.txt" echo TRIED=%VPN_TRIED%
+>>"%STATE_DIR%\vpn_result.txt" echo TOOL=%VPN_TOOL%
+>>"%STATE_DIR%\vpn_result.txt" echo DIR=%VPN_DIR%
+>>"%STATE_DIR%\vpn_result.txt" echo PORT=%VPN_PORT%
+exit /b 0
+
 REM Names shown in the egress messages.
 :vpn_labels
 set "WG_DIR_SHOW=%WG_DIR%"
 if not defined WG_DIR_SHOW set "WG_DIR_SHOW=%STATE_DIR%\wireguard"
+goto :eof
+
+REM v2.62: boot the shared WARP egress pool. With WPOOL_ENABLE=0 nothing here runs.
+REM The daemon is shared by every window; it is never stopped on window close (-Action down is manual).
+:wpool_start
+if /i not "%WPOOL_ENABLE%"=="1" goto :eof
+set "OC_POOL_STATE=%BASE_STATE%"
+if not defined OC_POOL_STATE set "OC_POOL_STATE=%STATE_DIR%"
+if not exist "%OC_POOL_STATE%\warp-pool.ps1" goto :eof
+md "%OC_POOL_STATE%\pool" >nul 2>&1
+set "OC_WPSTATUS=%OC_POOL_STATE%\pool\pool-status.json"
+set "OC_WPUP=0"
+if exist "%OC_WPSTATUS%" for /f "usebackq delims=" %%i in (`%PSX% -NoProfile -Command "try{ $s=[IO.File]::ReadAllText($env:OC_WPSTATUS) | ConvertFrom-Json -ErrorAction Stop; [Console]::Out.Write([int]$s.up) }catch{ [Console]::Out.Write(0) }"`) do set "OC_WPUP=%%i"
+if not "%OC_WPUP%"=="0" goto :wpool_daemon_only
+:wpool_up
+REM One hidden PowerShell holds startup.lock for the lifetime of the daemon; a second window exits at once.
+start "" /b "%PSX%" -NoProfile -Command "$st=$env:OC_POOL_STATE; $lk=Join-Path (Join-Path $st 'pool') 'startup.lock'; $h=$null; try{ $h=[IO.File]::Open($lk,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }catch{ exit 0 }; try{ $sc=Join-Path $st 'warp-pool.ps1'; $rc=0; & $sc -Action up -Count ([int]$env:WPOOL_COUNT) -PortBase ([int]$env:WPOOL_PORT_BASE) -HealthSec ([int]$env:WPOOL_HEALTH_SEC) -LeaseMin ([int]$env:WPOOL_LEASE_MIN) -BurnedTtlHours ([int]$env:WPOOL_BURNED_TTL_HOURS) -DedupeTries ([int]$env:WPOOL_DEDUPE_TRIES) -State $st | Out-Null; $rc=$LASTEXITCODE; if($rc -eq 0){ & $sc -Action daemon -State $st -HealthSec ([int]$env:WPOOL_HEALTH_SEC) | Out-Null } } finally { if($h){ $h.Dispose() } }" >nul 2>&1
+set /a OC_WPWAIT=0
+:wpool_wait
+set "OC_WPUP=0"
+if exist "%OC_WPSTATUS%" for /f "usebackq delims=" %%i in (`%PSX% -NoProfile -Command "try{ $s=[IO.File]::ReadAllText($env:OC_WPSTATUS) | ConvertFrom-Json -ErrorAction Stop; [Console]::Out.Write([int]$s.up) }catch{ [Console]::Out.Write(0) }"`) do set "OC_WPUP=%%i"
+if not "%OC_WPUP%"=="0" goto :wpool_ready
+set /a OC_WPWAIT+=1
+if %OC_WPWAIT% GEQ 60 goto :wpool_slow
+ping -n 2 127.0.0.1 >nul
+goto :wpool_wait
+:wpool_ready
+call :log "warp pool: startup ok, slots up" boot
+goto :eof
+:wpool_slow
+call :log "warp pool: startup still pending; continuing on the old egress" boot
+goto :eof
+:wpool_daemon_only
+start "" /b "%PSX%" -NoProfile -Command "& '%OC_POOL_STATE%\warp-pool.ps1' -Action daemon -State '%OC_POOL_STATE%' -HealthSec %WPOOL_HEALTH_SEC%" >nul 2>&1
+call :log "warp pool: slots already up, daemon ensured" boot
 goto :eof
 
 REM v2.54: the pool worker (#>>>OC_POOL_PS) runs only while Settings is open. :pool_stop waits for it (up to 2 min).
@@ -3692,6 +3821,17 @@ if /i not "%EGRESS%"=="VPNGATE" call echo %T_285%
 exit /b 1
 REM Stops the proxy this launcher started. No administrator prompt.
 :vpn_stop
+if /i not "%WPOOL_ENABLE%"=="1" goto :vpn_stop_nopool
+if /i not "%EGRESS%"=="WIREGUARD" goto :vpn_stop_nopool
+if not defined OC_SID goto :vpn_stop_nopool
+set "OC_POOL_STATE=%BASE_STATE%"
+if not defined OC_POOL_STATE set "OC_POOL_STATE=%STATE_DIR%"
+if not exist "%OC_POOL_STATE%\warp-pool.ps1" goto :vpn_stop_nopool
+REM v2.62: release only this window's claim; the pool and its wireproxy slots keep running.
+"%PSX%" -NoProfile -Command "& '%OC_POOL_STATE%\warp-pool.ps1' release -Instance '%OC_SID%' -State '%OC_POOL_STATE%'" >nul 2>&1
+if defined OC_NODE_OPTIONS_SET set "NODE_OPTIONS=%OC_NODE_OPTIONS_PREV%"
+exit /b 0
+:vpn_stop_nopool
 call :vpn_run stop
 if defined OC_NODE_OPTIONS_SET set "NODE_OPTIONS=%OC_NODE_OPTIONS_PREV%"
 exit /b 0
@@ -6062,7 +6202,7 @@ REM - load config.env into this process; derived values follow the port
 REM N36: only the keys the launcher owns are taken from these files, so a
 REM hand-edited PATH, TEMP, STATE_DIR or COMSPEC cannot replace the environment
 REM of the running launcher.
-set "CFG_KEYS= AUTO_ROTATE CHAT_SNAPSHOT IP_FIND_MAX KEY_MENU KEY_QUIT KEY_ROTATE LIMIT_ACTION LIMIT_MODEL LIMIT_ROT_MAX LOG_ENABLED LOG_MASK_IP LOG_MAX_KB MENU_DEFAULT MULTI_INSTANCE OC_API_BASE OC_APP OC_EGRESS_DEFAULT OC_MODE_DEFAULT OC_MODEL OC_OTHER_WINDOW OCUI_COLOR OCUI_FONT OCUI_FONT_SIZE OCUI_ICONS OCUI_LANG OCUI_THEME ON_CLOSE POOL_ENABLE POOL_INTERVAL POOL_MAX PROBE PROBE_BROKEN_MAX PROBE_MODEL PROXY_API_CHECK PROXY_API_CHECK_URL PROXY_FIXED PROXY_LIST_MIN_BYTES PROXY_LIST_URL PROXY_PORT PROXY_PROBE_TIMEOUT PROXY_ROT_MAX PROXY_TRY_MAX QUOTA_RESUME RESUME_AUTO RESUME_MODE RESUME_MSG RESUME_TEXT RESUME_TIMEOUT REUSE_EMPTY ROTATE_COOLDOWN ROTATE_TRIES_MAX TARGET_COUNTRY TARGET_INTERVAL TARGET_MINUTES TARGET_PREFIX TARGET_TRIES TOR_AUTO_INSTALL TOR_BOOTSTRAP_WAIT TOR_HTTP_PORT TOR_SOCKS_PORT TYPE_AHEAD UI_ACC UI_COLOR UPDATE_ASK UPDATE_CHECK VPN_TIMEOUT VPNGATE_COUNTRY VPNGATE_MAX WARP_CALL_TIMEOUT WARP_WAIT WATCH WG_DIR WHERE_TIMEOUT "
+set "CFG_KEYS= AUTO_ROTATE CHAT_SNAPSHOT IP_FIND_MAX KEY_MENU KEY_QUIT KEY_ROTATE LIMIT_ACTION LIMIT_MODEL LIMIT_ROT_MAX LOG_ENABLED LOG_MASK_IP LOG_MAX_KB MENU_DEFAULT MULTI_INSTANCE OC_API_BASE OC_APP OC_EGRESS_DEFAULT OC_MODE_DEFAULT OC_MODEL OC_OTHER_WINDOW OCUI_COLOR OCUI_FONT OCUI_FONT_SIZE OCUI_ICONS OCUI_LANG OCUI_THEME ON_CLOSE POOL_ENABLE POOL_INTERVAL POOL_MAX PROBE PROBE_BROKEN_MAX PROBE_MODEL PROXY_API_CHECK PROXY_API_CHECK_URL PROXY_FIXED PROXY_LIST_MIN_BYTES PROXY_LIST_URL PROXY_PORT PROXY_PROBE_TIMEOUT PROXY_ROT_MAX PROXY_TRY_MAX QUOTA_RESUME RESUME_AUTO RESUME_MODE RESUME_MSG RESUME_TEXT RESUME_TIMEOUT REUSE_EMPTY ROTATE_COOLDOWN ROTATE_TRIES_MAX TARGET_COUNTRY TARGET_INTERVAL TARGET_MINUTES TARGET_PREFIX TARGET_TRIES TOR_AUTO_INSTALL TOR_BOOTSTRAP_WAIT TOR_HTTP_PORT TOR_SOCKS_PORT TYPE_AHEAD UI_ACC UI_COLOR UPDATE_ASK UPDATE_CHECK VPN_TIMEOUT VPNGATE_COUNTRY VPNGATE_MAX WARP_CALL_TIMEOUT WARP_WAIT WATCH WG_DIR WHERE_TIMEOUT WPOOL_BURNED_TTL_HOURS WPOOL_COUNT WPOOL_DEDUPE_TRIES WPOOL_ENABLE WPOOL_HEALTH_SEC WPOOL_LEASE_MIN WPOOL_PORT_BASE WPOOL_ROTATE_MODE WPOOL_VERIFY_PROBE WPOOL_WG_DIR "
 if exist "%STATE_DIR%\ui.env" for /f "usebackq tokens=1* delims==" %%a in ("%STATE_DIR%\ui.env") do for %%k in (%CFG_KEYS%) do if /i "%%a"=="%%k" set "%%a=%%b"
 call :ui_style
 if not exist "%STATE_DIR%\config.env" goto :cfg_nums
@@ -6097,6 +6237,14 @@ call :numcfg VPNGATE_MAX 8
 call :numcfg0 LIMIT_ROT_MAX 3
 call :numcfg TOR_BOOTSTRAP_WAIT 120
 call :numcfg LOG_MAX_KB 1024
+REM v2.62: WARP egress pool. WPOOL_VERIFY_PROBE may be 0 (off).
+call :numcfg WPOOL_COUNT 4 16
+call :numcfg WPOOL_PORT_BASE 42000 65535
+call :numcfg WPOOL_DEDUPE_TRIES 3
+call :numcfg WPOOL_HEALTH_SEC 30 600
+call :numcfg WPOOL_LEASE_MIN 15 1440
+call :numcfg WPOOL_BURNED_TTL_HOURS 24
+call :numcfg0 WPOOL_VERIFY_PROBE 0
 goto :eof
 
 REM - --help: the commands. Plain text, no setup needed.
@@ -7607,6 +7755,11 @@ $Schema = @(
   S 'PROXY_PORT' 'WARP' 'WARP proxy port' 'port' 40000 'Local port of the WARP proxy.' 'next WARP connect'
   S 'WARP_WAIT' 'WARP' 'WARP wait (s)' 'int' 6 'Seconds to wait after (re)connecting WARP.' 'now' 1 60
   S 'WARP_CALL_TIMEOUT' 'WARP' 'warp-cli timeout (s)' 'int' 15 'Seconds a single warp-cli call may take.' 'now' 5 300
+  S 'WPOOL_ENABLE' 'Egress pool' 'Use the egress pool' 'bool' 0 'On: each window claims a WARP tunnel with its own IPv6 exit IP from warp-pool.ps1. Off: the normal egress is used.' 'next launch'
+  S 'WPOOL_COUNT' 'Egress pool' 'Tunnels in the pool' 'int' 4 'How many WARP tunnels the pool keeps up.' 'now' 1 16
+  S 'WPOOL_PORT_BASE' 'Egress pool' 'First pool port' 'port' 42000 'Local port of the first slot; slot N uses base+N.' 'now'
+  S 'WPOOL_HEALTH_SEC' 'Egress pool' 'Health check (s)' 'int' 30 'Seconds between checks of the pool daemon.' 'now' 5 600
+  S 'WPOOL_LEASE_MIN' 'Egress pool' 'Claim lease (min)' 'int' 15 'Minutes before an abandoned claim can be cleared by warp-pool.ps1 -Action reap. Live claims are never released based on process liveness.' 'now' 1 1440
   S 'PROXY_LIST_URL' 'Proxy list' 'Proxy list source' 'listsrc' 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=protocolipport&format=text' 'URL or local file, any format (plain, CSV, JSON, XML, HTML).' 'now'
   S 'PROXY_LIST_MIN_BYTES' 'Proxy list' 'Minimum list size (bytes)' 'int' 20 'A downloaded list smaller than this is rejected. 0 = off.' 'now' 0 100000000
   S 'PROXY_TRY_MAX' 'Proxy list' 'Proxies tried per pick' 'int' 40 'How many untried proxies to test before giving up. Tested ones are skipped until the whole list was used.' 'now' 1 500
@@ -7669,12 +7822,13 @@ $Schema = @(
   S 'LOG_MAX_KB' 'Logs' 'Log size limit (KB)' 'int' 1024 'The log is cut to its newest part when it grows past this.' 'next launch' 64 10240
   S 'LOG_MASK_IP' 'Logs' 'Hide IPs in reports' 'bool' 1 'Public IP addresses are masked in the support report.' 'now'
 )
-$Groups = @('Common', 'Launch', 'Connection', 'WARP', 'Tor', 'Proxy list', 'WireGuard / VPN Gate', 'IP rotation', 'Probe', 'Session', 'Paths', 'Updates', 'Appearance', 'Shortcuts', 'Logs')
+$Groups = @('Common', 'Launch', 'Connection', 'WARP', 'Egress pool', 'Tor', 'Proxy list', 'WireGuard / VPN Gate', 'IP rotation', 'Probe', 'Session', 'Paths', 'Updates', 'Appearance', 'Shortcuts', 'Logs')
 $GroupHelp = @{
   'Common' = 'The settings most people change: connection, proxy list, rotation, language and theme. The other groups are for advanced use.'
   'Launch' = 'How OpenCode starts: run mode, the menu shortcut, reusing an empty chat and several windows.'
   'Connection' = 'The default connection method opencode uses at start.'
   'WARP' = 'The WARP proxy port and the warp-cli timings.'
+  'Egress pool' = 'Shared WARP tunnels: each window claims one slot with its own IPv6 exit IP, rotates that slot and releases it on exit.'
   'Tor' = 'Ports and install behavior of the portable Tor the launcher starts for you.'
   'Proxy list' = 'Where proxies come from (URL or file, any format) and how each one is tested.'
   'WireGuard / VPN Gate' = 'The WireGuard and VPN Gate methods: the folder of .conf files, the time limit, the country and how many servers are tried.'
@@ -9345,7 +9499,7 @@ function New-Report {
   $total = 6
   & $A 'OpenCode Infinite - support report'
   & $A ('Generated   ' + (Get-Date).ToString('o'))
-  & $A 'Launcher    v2.61.0'
+  & $A 'Launcher    v2.62.0'
   & $A ('File        ' + $Self)
   try { $fi = Get-Item -LiteralPath $Self; & $A ('Size/date   ' + $fi.Length + ' bytes, ' + $fi.LastWriteTime.ToString('s')); & $A ('SHA-256     ' + (Get-FileHash -LiteralPath $Self -Algorithm SHA256).Hash) } catch { }
   & $A 'Personal data (user name, PC name, e-mails, tokens, passwords, and by default public IPs) is removed from this file. Read it before sharing.'
@@ -9540,7 +9694,7 @@ function Menu-Main {
     @{ L = ($script:I.back + ' Back'); C = 10; H = 'Return to the home screen.' },
     @{ L = ($script:I.err + ' Exit'); C = 6; H = 'Close the launcher.' })
   $head = Header-Lines
-  $r = Show-Menu 'OpenCode' $items ('v2.61.0   ' + $Repo) $head 0
+  $r = Show-Menu 'OpenCode' $items ('v2.62.0   ' + $Repo) $head 0
   if ($r -eq -1) { exit 10 }
   exit $items[$r].C
 }
@@ -9747,7 +9901,7 @@ function Home-Loop {
       $head += ''
     }
     if ($script:Notice) { $head += (P (Style $script:Notice[0]) ($script:I.warn + ' ' + (T $script:Notice[1]))); $head += ''; $script:Notice = $null }
-    $r = Show-Menu 'Main menu' $items ('v2.61.0   ' + $Self) $head $pos $true
+    $r = Show-Menu 'Main menu' $items ('v2.62.0   ' + $Self) $head $pos $true
     if ($r -eq -1) { continue }
     $pos = $r
     Log ('home -> ' + $acts[$r])
