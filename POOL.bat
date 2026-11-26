@@ -89,7 +89,7 @@ goto :fim
 
 :do_claim
 set "INST=%~2"
-if defined FROMMENU if "%INST%"=="" set /p "Instancia: "
+if defined FROMMENU if "%INST%"=="" set /p "INST=Instancia: "
 if "%INST%"=="" (
   echo Uso: POOL.bat claim ^<instancia^>
   goto :fim
@@ -99,7 +99,7 @@ goto :fim
 
 :do_release
 set "INST=%~2"
-if defined FROMMENU if "%INST%"=="" set /p "Instancia: "
+if defined FROMMENU if "%INST%"=="" set /p "INST=Instancia: "
 if "%INST%"=="" (
   echo Uso: POOL.bat release ^<instancia^>
   goto :fim
