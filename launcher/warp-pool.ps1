@@ -13,6 +13,9 @@ param(
   [int]$Count = 0,
   [int]$Slot = 0,
   [string]$Instance = '',
+  # claim: the long-lived process that owns the claim (launcher cmd.exe, dispatcher). 0 = the
+  # parent of this PowerShell, which is the caller when it runs the script directly.
+  [int]$OwnerPid = 0,
   [switch]$Force,
   [switch]$AllowWarpTunnel,
   [string]$State = ($env:LOCALAPPDATA + '\opencode-infinite'),
@@ -34,7 +37,7 @@ $WpSha = 'bce041ea9fe0f8a3351301dcbe29cdf6a523bb25cf9c62f17ebb5699a8051d0f'
 $WpExeSha = 'b176b561fd8bf15d828fcab484cfd5b4fb941cb9f61807901ca64b955af27e1f'
 $WpUrl = 'https://github.com/windtf/wireproxy/releases/download/v1.1.3/wireproxy_windows_amd64.tar.gz'
 $PeerEndpoint = '162.159.192.1:2408'
-$ScriptVersion = '1.0'
+$ScriptVersion = '1.1'
 
 $State = [IO.Path]::GetFullPath($State)
 $poolDir = Join-Path $State 'pool'
@@ -71,6 +74,13 @@ if (-not $PSBoundParameters.ContainsKey('BurnedTtlHours')) { $BurnedTtlHours = [
 if (-not $PSBoundParameters.ContainsKey('WgDir')) { $WgDir = [string](CfgVal 'WPOOL_WG_DIR' '') }
 $RotateMode = [string](CfgVal 'WPOOL_ROTATE_MODE' 'reconnect')
 $VerifyProbe = [int](CfgVal 'WPOOL_VERIFY_PROBE' 0)
+# Measured on this project's target host: wireproxy inside a connected WARP client still gets a
+# distinct per-device IPv6 per slot, so stacking is allowed by default. 0 restores the plan's
+# strict rule (up refuses with exit 6 while warp-cli reports Connected).
+# The launcher exports its effective value; config.json is the fallback for POOL.bat / manual runs.
+$allowCfg = [string]$env:WPOOL_ALLOW_WARP_TUNNEL
+if ($allowCfg -notmatch '^[01]$') { $allowCfg = [string](CfgVal 'WPOOL_ALLOW_WARP_TUNNEL' 1) }
+if (-not $AllowWarpTunnel -and $allowCfg -eq '1') { $AllowWarpTunnel = [switch]$true }
 if (-not $TraceUrl) { $TraceUrl = 'https://www.cloudflare.com/cdn-cgi/trace' }
 
 function Ensure-Dirs {
@@ -188,6 +198,9 @@ function Refresh-ClaimIp([int]$n) {
     try {
       $c.ip = $ip
       Write-Json $cf.FullName $c
+      if ($c.PSObject.Properties['instance'] -and $c.instance) {
+        Write-Json (Instance-EgressPath ([string]$c.instance)) ([ordered]@{ slot = $n; port = [int]$c.port; proxy = [string]$c.proxy; ip = $ip; colo = [string]$s.colo })
+      }
     } catch {
       Write-Event 'claim-ip-refresh-error' @{ slot = $n; file = $cf.Name; error = $_.Exception.Message }
     }
@@ -386,6 +399,43 @@ function Lock-Slot([int]$n, [int]$timeoutMs) {
   }
 }
 
+function Lock-Pool([string]$name, [int]$timeoutMs) {
+  $path = Join-Path $poolDir ($name + '.lock')
+  $end = (Get-Date).AddMilliseconds([Math]::Max(0, $timeoutMs))
+  while ($true) {
+    try {
+      return [IO.File]::Open($path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    } catch [IO.IOException] {
+      if ((Get-Date) -ge $end) { return $null }
+      Start-Sleep -Milliseconds 250
+    } catch { return $null }
+  }
+}
+# Claim owner = a long-lived process identified by pid + start ticks (never a recycled pid).
+function Get-OwnerIdentity([int]$ownerPid) {
+  $id = $ownerPid
+  if ($id -le 0) {
+    try { $id = [int](Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId=' + $PID) -ErrorAction Stop).ParentProcessId } catch { $id = 0 }
+  }
+  if ($id -le 0) { return $null }
+  try {
+    $p = Get-Process -Id $id -ErrorAction Stop
+    return [ordered]@{ pid = [int]$id; ticks = [long]$p.StartTime.Ticks; name = [string]$p.ProcessName }
+  } catch { return $null }
+}
+# $true = owner process alive, $false = gone, $null = unknown (claim written before v1.1).
+function Test-OwnerAlive($owner) {
+  if (-not $owner) { return $null }
+  if (-not $owner.PSObject.Properties['kind'] -or [string]$owner.kind -ne 'process') { return $null }
+  $procId = 0; $ticks = [long]0
+  try { $procId = [int]$owner.pid; $ticks = [long]$owner.ticks } catch { return $null }
+  if ($procId -le 0 -or $ticks -le 0) { return $null }
+  return ($null -ne (Get-ProcessByPidStart $procId $ticks))
+}
+function Instance-EgressPath([string]$inst) {
+  return (Join-Path (Join-Path (Join-Path $State 'instances') $inst) 'egress.json')
+}
+
 function Invoke-NativeQuiet {
   param([string]$Exe, [string[]]$Argv)
   $old = $ErrorActionPreference
@@ -498,7 +548,9 @@ function Test-WarpConnected {
     $txt = ''
     if (Test-Path -LiteralPath $out) { $txt = [IO.File]::ReadAllText($out) }
     $txt = $txt -replace '\x1b\[[0-9;]*m', ''
-    return ($txt -match '(?im)^\s*(Status\s*:\s*)?Connected\s*$')
+    # warp-cli 2024+ prints "Status update: Connected"; older builds print "Status: Connected"
+    # or a bare "Connected". "Disconnected"/"Connecting" must not match.
+    return ($txt -match '(?im)^\s*(Status(\s+update)?\s*:\s*)?Connected\b')
   } catch { return $false }
   finally {
     Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
@@ -509,7 +561,7 @@ function Convert-ProfileText([string]$text, [int]$port) {
   $lines = @($text -split "`r?`n")
   $out = New-Object System.Collections.Generic.List[string]
   $section = ''
-  $seenDns = $false; $seenEndpoint = $false; $seenAllowed = $false; $hasV6 = $false
+  $seenDns = $false; $seenEndpoint = $false; $seenAllowed = $false; $hasV6 = $false; $seenKeepalive = $false
   foreach ($ln in $lines) {
     $t = $ln.Trim()
     if ($t -match '^\[(.+)\]$') {
@@ -517,6 +569,7 @@ function Convert-ProfileText([string]$text, [int]$port) {
       if ($section -eq 'peer') {
         if (-not $seenEndpoint) { $out.Add('Endpoint = ' + $PeerEndpoint); $seenEndpoint = $true }
         if (-not $seenAllowed) { $out.Add('AllowedIPs = 0.0.0.0/0, ::/0'); $seenAllowed = $true }
+        if (-not $seenKeepalive) { $out.Add('PersistentKeepalive = 25'); $seenKeepalive = $true }
       }
       $section = $matches[1].Trim().ToLower()
       if ($section -eq 'http') { continue }
@@ -533,6 +586,7 @@ function Convert-ProfileText([string]$text, [int]$port) {
     if ($kl -eq 'dns') { if (-not $seenDns) { $out.Add('DNS = 1.1.1.1'); $seenDns = $true }; continue }
     if ($kl -eq 'endpoint') { if (-not $seenEndpoint) { $out.Add('Endpoint = ' + $PeerEndpoint); $seenEndpoint = $true }; continue }
     if ($kl -eq 'allowedips') { if (-not $seenAllowed) { $out.Add('AllowedIPs = 0.0.0.0/0, ::/0'); $seenAllowed = $true }; continue }
+    if ($kl -eq 'persistentkeepalive') { $seenKeepalive = $true; $out.Add('PersistentKeepalive = ' + $v); continue }
     if ($kl -eq 'address') {
       if ($v -match ':') { $hasV6 = $true }
       $out.Add('Address = ' + $v)
@@ -544,6 +598,9 @@ function Convert-ProfileText([string]$text, [int]$port) {
   if ($section -eq 'peer') {
     if (-not $seenEndpoint) { $out.Add('Endpoint = ' + $PeerEndpoint) }
     if (-not $seenAllowed) { $out.Add('AllowedIPs = 0.0.0.0/0, ::/0') }
+    # Pool slots sit idle most of the time; without a keepalive the UDP mapping in the router (or in
+    # the WARP client tunnel) expires and the next trace or request stalls until a new handshake.
+    if (-not $seenKeepalive) { $out.Add('PersistentKeepalive = 25') }
   }
   if (-not $hasV6) { throw 'profile has no IPv6 Address' }
   $joined = $out -join "`r`n"
@@ -609,19 +666,80 @@ function Ensure-Identity([int]$n, [switch]$NewIdentity) {
   }
   return (New-WgcfIdentity $n)
 }
+# CreateProcess with no inherited handles, no console (CREATE_NO_WINDOW) and, when the caller's job
+# allows it, out of that job (CREATE_BREAKAWAY_FROM_JOB): a slot outlives whoever started it.
+# Compiled only when a wireproxy is started, so claim/status/release stay fast.
+function Ensure-Detached {
+  if ('OpenInfinite.Detached' -as [type]) { return }
+  Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+namespace OpenInfinite {
+  public static class Detached {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct STARTUPINFO {
+      public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
+      public int dwX; public int dwY; public int dwXSize; public int dwYSize;
+      public int dwXCountChars; public int dwYCountChars; public int dwFillAttribute; public int dwFlags;
+      public short wShowWindow; public short cbReserved2; public IntPtr lpReserved2;
+      public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    private struct PROCESS_INFORMATION { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool CreateProcessW(string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit,
+      uint flags, IntPtr env, string cwd, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+    [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr h);
+    public static int Start(string exe, string args, string cwd) {
+      const uint CREATE_NO_WINDOW = 0x08000000, CREATE_NEW_PROCESS_GROUP = 0x00000200, CREATE_BREAKAWAY_FROM_JOB = 0x01000000;
+      int err = 0;
+      foreach (uint extra in new uint[] { CREATE_BREAKAWAY_FROM_JOB, 0 }) {
+        STARTUPINFO si = new STARTUPINFO();
+        si.cb = Marshal.SizeOf(typeof(STARTUPINFO));
+        PROCESS_INFORMATION pi;
+        StringBuilder cmd = new StringBuilder("\"" + exe + "\" " + args);
+        if (CreateProcessW(exe, cmd, IntPtr.Zero, IntPtr.Zero, false, CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | extra, IntPtr.Zero, cwd, ref si, out pi)) {
+          CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+          return pi.dwProcessId;
+        }
+        err = Marshal.GetLastWin32Error();
+      }
+      throw new Win32Exception(err);
+    }
+  }
+}
+'@
+}
 function Start-SlotProcess([int]$n) {
   $bins = Ensure-Bins
   $dir = SlotDir $n
   $run = Join-Path $dir 'run.conf'
   if (-not (Test-Path -LiteralPath $run)) { throw ('run.conf missing for slot ' + $n) }
-  $out = Join-Path $dir 'out.log'
-  $err = Join-Path $dir 'err.log'
-  Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $err -Force -ErrorAction SilentlyContinue
-  $p = Start-Process -FilePath $bins.wireproxy -ArgumentList @('-s', '-c', ('"' + $run + '"')) -WindowStyle Hidden -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
-  if (-not $p) { throw ('wireproxy did not start for slot ' + $n) }
+  # Plan, up step 3: the port is pinned to the slot. A port already taken fails the slot instead of
+  # starting a second wireproxy that cannot bind (and whose trace would measure someone else's proxy).
+  $s0 = Get-Slot $n
+  $port0 = [int]$s0.port
+  if (-not (Test-SlotPortInRange $port0)) { $port0 = SlotPort $n }
+  if (Test-Port $port0) {
+    if (Test-SlotProcess $s0) { throw ('slot ' + $n + ' already has a running wireproxy on port ' + $port0) }
+    throw ('port ' + $port0 + ' is in use by another program; slot ' + $n + ' not started')
+  }
+  # v1.0 used Start-Process -Redirect*, which inherits every handle of this PowerShell and its
+  # console. A caller reading this script through a pipe (the dispatcher's '2>&1 | Out-Null')
+  # then waited until the wireproxy exited -- i.e. forever -- and closing the launcher window that
+  # booted the pool killed the slots on its console. -s keeps wireproxy silent, so no log is lost.
+  foreach ($old in @('out.log', 'err.log')) { Remove-Item -LiteralPath (Join-Path $dir $old) -Force -ErrorAction SilentlyContinue }
+  $newPid = 0
+  Ensure-Detached
+  try { $newPid = [OpenInfinite.Detached]::Start($bins.wireproxy, ('-s -c "' + $run + '"'), $dir) }
+  catch { throw ('wireproxy did not start for slot ' + $n + ': ' + $_.Exception.Message) }
+  $p = $null
+  try { $p = Get-Process -Id $newPid -ErrorAction Stop } catch { }
+  if (-not $p) { throw ('wireproxy exited at once for slot ' + $n) }
   $ticks = [long]0
-  try { $ticks = $p.StartTime.Ticks } catch { try { $ticks = (Get-Process -Id $p.Id).StartTime.Ticks } catch { } }
+  try { $ticks = $p.StartTime.Ticks } catch { }
   $s = Get-Slot $n
   if (-not (Test-SlotPortInRange ([int]$s.port))) { $s.port = SlotPort $n }
   $s.pid = [int]$p.Id
@@ -665,7 +783,18 @@ function Stop-SlotProcess([int]$n) {
   while ((Get-Date) -lt $end -and (Test-Port ([int]$s.port))) { Start-Sleep -Milliseconds 100 }
   return $s
 }
-function Wait-SlotHealthy([int]$n, [int]$seconds, [string]$prevIp = '') {
+function Get-BurnedIps($s) {
+  $ips = @()
+  foreach ($b in @($s.burned)) {
+    if (-not $b -or -not $b.ip) { continue }
+    $expired = $false
+    if ($b.until) { try { if ([DateTime]::Parse([string]$b.until) -lt (Get-Date)) { $expired = $true } } catch { } }
+    if (-not $expired) { $ips += [string]$b.ip }
+  }
+  return $ips
+}
+# $avoid = IPs that do not count as a new exit (the previous IP plus the slot's live burned[]).
+function Wait-SlotHealthy([int]$n, [int]$seconds, [string[]]$avoid = @()) {
   $end = (Get-Date).AddSeconds($seconds)
   $last = $null
   while ((Get-Date) -lt $end) {
@@ -673,7 +802,7 @@ function Wait-SlotHealthy([int]$n, [int]$seconds, [string]$prevIp = '') {
     if (-not (Test-SlotProcess $s)) { return @{ ok = $false; reason = 'process dead'; trace = $null } }
     $m = Measure-Slot $s 8
     if ($m.ok) {
-      if (-not $prevIp -or $m.trace.ip -ne $prevIp) { return $m }
+      if (@($avoid | Where-Object { $_ }).Count -eq 0 -or $avoid -notcontains [string]$m.trace.ip) { return $m }
       $last = $m
     }
     Start-Sleep -Milliseconds 1000
@@ -681,16 +810,28 @@ function Wait-SlotHealthy([int]$n, [int]$seconds, [string]$prevIp = '') {
   if ($last) { return @{ ok = $false; reason = 'same ip'; trace = $last.trace } }
   return @{ ok = $false; reason = 'no trace'; trace = $null }
 }
-function Start-Slot([int]$n, [switch]$NewIdentity, [string]$PrevIp = '', [int]$WaitSec = 25) {
+function Start-Slot([int]$n, [switch]$NewIdentity, [string]$PrevIp = '', [int]$WaitSec = 25, [switch]$AvoidBurned) {
   $s = Get-Slot $n
   if (-not (Test-SlotPortInRange ([int]$s.port))) { $s.port = SlotPort $n }
-  $identity = Ensure-Identity $n -NewIdentity:$NewIdentity
-  $run = Write-RunConf $n
-  $s.identity = $identity
-  $s.conf = $run
-  Save-Slot $s
-  $s = Start-SlotProcess $n
-  $m = Wait-SlotHealthy $n $WaitSec $PrevIp
+  # One wireproxy per slot: any process still serving this slot is stopped first, so a restart,
+  # a reconnect or a new identity never races a second wireproxy for the same port.
+  if (Test-SlotProcess $s) { Stop-SlotProcess $n | Out-Null; $s = Get-Slot $n }
+  $avoid = @()
+  if ($PrevIp) { $avoid += $PrevIp }
+  if ($AvoidBurned) { $avoid += @(Get-BurnedIps $s) }
+  try {
+    $identity = Ensure-Identity $n -NewIdentity:$NewIdentity
+    $run = Write-RunConf $n
+    $s = Get-Slot $n
+    $s.identity = $identity
+    $s.conf = $run
+    Save-Slot $s
+    $s = Start-SlotProcess $n
+  } catch {
+    Write-Event 'slot-error' @{ slot = $n; error = $_.Exception.Message }
+    return @{ ok = $false; reason = $_.Exception.Message; slot = $n; ip = '' }
+  }
+  $m = Wait-SlotHealthy $n $WaitSec $avoid
   if (-not $m.ok) {
     Stop-SlotProcess $n | Out-Null
     return @{ ok = $false; reason = $m.reason; slot = $n; ip = '' }
@@ -729,22 +870,22 @@ function Rotate-Slot([int]$n, [switch]$ForceIdentity, [int]$MaxIdentity = 2, [in
   $manual = Use-Manual $n
   $success = $false
   $lastIp = $oldIp
+  # Plan: reconnect first (no registration); an IP equal to the old one or still in burned[]
+  # twice escalates to a new identity. Start-Slot stops the running wireproxy itself.
   if (-not $ForceIdentity) {
     for ($i = 1; $i -le 2; $i++) {
-      if (Test-SlotProcess $s) { Stop-SlotProcess $n | Out-Null }
-      $r = Start-Slot $n -PrevIp $oldIp -WaitSec $WaitSec
-      if ($r.ok) { $lastIp = [string]$r.ip }
-      if ($r.ok -and $r.ip -ne $oldIp) { $success = $true; break }
+      $r = Start-Slot $n -PrevIp $oldIp -WaitSec $WaitSec -AvoidBurned
+      if ($r.ok) { $lastIp = [string]$r.ip; $success = $true; break }
     }
   }
   if (-not $success -and -not $manual) {
     for ($i = 1; $i -le $MaxIdentity; $i++) {
-      $r = Start-Slot $n -NewIdentity -PrevIp $oldIp -WaitSec 25
-      if ($r.ok) { $lastIp = [string]$r.ip }
-      if ($r.ok -and $r.ip -ne $oldIp) { $success = $true; break }
+      $r = Start-Slot $n -NewIdentity -PrevIp $oldIp -WaitSec 25 -AvoidBurned
+      if ($r.ok) { $lastIp = [string]$r.ip; $success = $true; break }
     }
   }
   if (-not $success) {
+    # Keep the slot serving even when no new IP was found: a stale exit beats a dead port.
     $r = Start-Slot $n -WaitSec 25
     if ($r.ok) { $lastIp = [string]$r.ip }
   }
@@ -761,93 +902,80 @@ function Rotate-Slot([int]$n, [switch]$ForceIdentity, [int]$MaxIdentity = 2, [in
   Refresh-ClaimIp $n
   return @{ ok = $success; slot = $n; before = $oldIp; after = $lastIp }
 }
-function Invoke-Dedupe($slots, [int]$tries) {
-  if ($tries -lt 1) { $tries = 1 }
-  $byIp = @{}
-  foreach ($s in @($slots | Sort-Object slot)) {
-    if ($s.health -ne 'up' -or -not $s.ip) { continue }
-    $key = [string]$s.ip
-    if (-not $byIp.ContainsKey($key)) { $byIp[$key] = @() }
-    $byIp[$key] += [int]$s.slot
-  }
-  foreach ($ip in @($byIp.Keys)) {
-    $nums = @($byIp[$ip] | Sort-Object)
-    if ($nums.Count -le 1) { continue }
-    foreach ($n in @($nums | Select-Object -Skip 1)) {
-      $ok = $false
-      for ($t = 1; $t -le $tries; $t++) {
-        $r = Rotate-Slot $n -ForceIdentity -MaxIdentity 1 -WaitSec 25
-        if ($r.ok) {
-          $cur = Get-Slot $n
-          $dup = $false
-          foreach ($o in @(Get-AllSlots)) {
-            if ([int]$o.slot -ne $n -and $o.health -eq 'up' -and $o.ip -eq $cur.ip) { $dup = $true }
-          }
-          if (-not $dup) { $ok = $true; break }
-        }
-      }
-      if (-not $ok) {
-        $cur = Get-Slot $n
-        $cur.health = 'degraded'
-        Save-Slot $cur
-        Write-Event 'dedupe-failed' @{ slot = $n; ip = $cur.ip; tries = $tries }
-      }
-    }
-  }
-}
 
 function Invoke-Up {
   Ensure-Dirs
   if ($Count -lt 1) { Write-Host 'up requires Count >= 1'; return 1 }
   if ($PortBase -le 0 -or (($PortBase + $Count) -gt 65535)) { Write-Host 'bad PortBase/Count'; return 1 }
+  # Two 'up' runs at once (launcher boot + POOL.bat, two windows) used to start two wireproxies per
+  # slot and register identities over each other. The second one now waits and then finds the
+  # slots already up, which is fast.
+  $upLock = Lock-Pool 'up' 600000
+  if (-not $upLock) { Write-Host 'another up is still running after 10 minutes'; return 4 }
+  try { return (Invoke-UpLocked) } finally { $upLock.Dispose() }
+}
+function Invoke-UpLocked {
   # Persist the effective base/count so every later action without explicit parameters reuses it.
   Write-Json $poolConfigFile ([ordered]@{ portBase = [int]$PortBase; count = [int]$Count; writtenAt = (Get-Date).ToString('o') })
   if (Test-Path -LiteralPath $stopFlag) { Remove-Item -LiteralPath $stopFlag -Force -ErrorAction SilentlyContinue }
-  if (-not $AllowWarpTunnel -and (Test-WarpConnected)) {
-    Write-Host 'warp-cli reports Connected; pass -AllowWarpTunnel to stack WARP-over-WARP'
+  $warpUp = Test-WarpConnected
+  if ($warpUp -and -not $AllowWarpTunnel) {
+    Write-Host 'warp-cli reports Connected; disconnect WARP or set WPOOL_ALLOW_WARP_TUNNEL=1 (or pass -AllowWarpTunnel)'
+    Write-Event 'warp-client-refused' @{ connected = $true }
     return 6
   }
+  if ($warpUp) { Write-Event 'warp-client-stacked' @{ connected = $true; note = 'slots run inside the WARP client tunnel' } }
   Ensure-Bins | Out-Null
   for ($n = 1; $n -le $Count; $n++) {
-    $s = Get-Slot $n
-    $expected = SlotPort $n
-    if ($s.pid -gt 0 -and [int]$s.port -eq $expected) {
-      $m = Measure-Slot $s 8
-      if ($m.ok) {
-        $s.ip = [string]$m.trace.ip
-        $s.colo = [string]$m.trace.colo
-        $s.warp = [string]$m.trace.warp
-        $s.health = 'up'
-        $s.verifiedAt = (Get-Date).ToString('o')
-        Save-Slot $s
-        Write-Host ('slot ' + $n + ' already up on port ' + $expected + ' ip ' + $s.ip)
-        continue
-      }
-    }
-    Stop-SlotProcess $n | Out-Null
-    $ok = $false
-    for ($attempt = 1; $attempt -le 2; $attempt++) {
-      try {
-        $r = Start-Slot $n -NewIdentity:($attempt -gt 1) -WaitSec 25
-        if ($r.ok) { $ok = $true; break }
-        Write-Event 'slot-attempt' @{ slot = $n; attempt = $attempt; ok = $false; reason = $r.reason }
-        Write-Host ('slot ' + $n + ' attempt ' + $attempt + ' failed: ' + $r.reason)
-      } catch {
-        Write-Host ('slot ' + $n + ' attempt ' + $attempt + ' error: ' + $_.Exception.Message)
-        Write-Event 'slot-error' @{ slot = $n; attempt = $attempt; error = $_.Exception.Message }
+    # The daemon of another window may be restarting this slot right now: wait for its lock.
+    $lk = Lock-Slot $n 90000
+    if (-not $lk) { Write-Host ('slot ' + $n + ' is locked by another pool action; skipped'); continue }
+    try {
+      $s = Get-Slot $n
+      $expected = SlotPort $n
+      if ([int]$s.port -eq $expected -and (Test-SlotProcess $s)) {
+        $m = Measure-Slot $s 8
+        if (-not $m.ok) { Start-Sleep -Seconds 2; $m = Measure-Slot $s 8 }
+        if ($m.ok) {
+          $s.ip = [string]$m.trace.ip
+          $s.colo = [string]$m.trace.colo
+          $s.warp = [string]$m.trace.warp
+          $s.health = 'up'
+          $s.verifiedAt = (Get-Date).ToString('o')
+          Save-Slot $s
+          Write-Host ('slot ' + $n + ' already up on port ' + $expected + ' ip ' + $s.ip)
+          continue
+        }
       }
       Stop-SlotProcess $n | Out-Null
-    }
-    if (-not $ok) {
-      $s = Get-Slot $n
-      $s.health = 'down'
-      $s.ip = ''
-      $s.warp = ''
-      Save-Slot $s
-      Write-Host ('slot ' + $n + ' is down')
-    }
+      $ok = $false
+      for ($attempt = 1; $attempt -le 2; $attempt++) {
+        try {
+          $r = Start-Slot $n -NewIdentity:($attempt -gt 1) -WaitSec 25
+          if ($r.ok) { $ok = $true; break }
+          Write-Event 'slot-attempt' @{ slot = $n; attempt = $attempt; ok = $false; reason = $r.reason }
+          Write-Host ('slot ' + $n + ' attempt ' + $attempt + ' failed: ' + $r.reason)
+        } catch {
+          Write-Host ('slot ' + $n + ' attempt ' + $attempt + ' error: ' + $_.Exception.Message)
+          Write-Event 'slot-error' @{ slot = $n; attempt = $attempt; error = $_.Exception.Message }
+        }
+        Stop-SlotProcess $n | Out-Null
+      }
+      if (-not $ok) {
+        $s = Get-Slot $n
+        $s.health = 'down'
+        $s.ip = ''
+        $s.warp = ''
+        Save-Slot $s
+        Write-Host ('slot ' + $n + ' is down')
+      }
+    } finally { $lk.Dispose() }
   }
-  Invoke-Dedupe @(Get-AllSlots) ([Math]::Max(1, $DedupeTries))
+  for ($t = 1; $t -le [Math]::Max(1, $DedupeTries); $t++) {
+    $ips = @(Get-AllSlots | Where-Object { [int]$_.slot -le $Count -and $_.health -eq 'up' -and $_.ip } | ForEach-Object { [string]$_.ip })
+    if ($ips.Count -eq @($ips | Sort-Object -Unique).Count) { break }
+    Invoke-DaemonDedupe
+  }
   $slots = @(Get-AllSlots)
   Update-Uniqueness $slots
   $slots = @(Get-AllSlots)
@@ -885,10 +1013,13 @@ function Invoke-Status {
 }
 function Invoke-Claim {
   if (-not $Instance) { Write-Host 'claim requires -Instance'; return 1 }
-  if ($Instance -notmatch '^[A-Za-z0-9._-]{1,64}$') { Write-Host 'bad Instance name'; return 1 }
+  if ($Instance -notmatch '^[A-Za-z0-9._-]{1,64}$' -or $Instance -ieq 'egress') { Write-Host 'bad Instance name'; return 1 }
   Ensure-Dirs
   $nums = @(Get-SlotNumbers)
+  # Only the configured slots are handed out; slot folders past the count are leftovers.
+  if ($Count -ge 1) { $nums = @($nums | Where-Object { $_ -le $Count }) }
   if ($nums.Count -eq 0) { Write-Host 'no slots'; return 7 }
+  $ownerId = Get-OwnerIdentity $OwnerPid
   $claimPath = Join-Path $claimsDir ($Instance + '.json')
   $existing = Read-Json $claimPath
   $order = @()
@@ -910,20 +1041,44 @@ function Invoke-Claim {
       }
       $ownerInstance = ''
       if ($s.owner -and $s.owner.instance) { $ownerInstance = [string]$s.owner.instance }
-      if ($ownerInstance -and $ownerInstance -ne $Instance) { continue }
+      if ($ownerInstance -and $ownerInstance -ne $Instance) {
+        # A slot whose owner process is gone is free again (same rule as reap); a live or
+        # unknown owner keeps it.
+        if ((Test-OwnerAlive $s.owner) -ne $false) { continue }
+        Remove-Item -LiteralPath (Join-Path $claimsDir ($ownerInstance + '.json')) -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Instance-EgressPath $ownerInstance) -Force -ErrorAction SilentlyContinue
+        Write-Event 'reap' @{ instance = $ownerInstance; slot = $n; reason = 'owner-gone-on-claim' }
+      }
       $now = (Get-Date).ToString('o')
       $at = $now
       if ($existing -and [int]$existing.slot -eq $n -and $existing.at) { $at = [string]$existing.at }
-      $ticks = [long]0
-      try { $ticks = (Get-Process -Id $PID).StartTime.Ticks } catch { }
-      $s.owner = [ordered]@{ instance = $Instance; pid = $PID; ticks = $ticks; at = $at }
+      $owner = [ordered]@{ instance = $Instance; at = $at; renewedAt = $now }
+      if ($ownerId) {
+        $owner.kind = 'process'; $owner.pid = [int]$ownerId.pid; $owner.ticks = [long]$ownerId.ticks; $owner.process = [string]$ownerId.name
+      } else { $owner.kind = 'lease' }
+      $s.owner = $owner
       Save-Slot $s
       $claim = [ordered]@{
         instance = $Instance; slot = $n; port = [int]$s.port;
-        proxy = ('http://127.0.0.1:' + $s.port); ip = [string]$s.ip; at = $at
+        proxy = ('http://127.0.0.1:' + $s.port); ip = [string]$s.ip; at = $at; renewedAt = $now;
+        owner = $owner
       }
       Write-Json $claimPath $claim
-      Write-Event 'claim' @{ instance = $Instance; slot = $n; port = [int]$s.port }
+      # Plan: instances\<instance>\egress.json says exactly where this instance leaves from.
+      Write-Json (Instance-EgressPath $Instance) ([ordered]@{ slot = $n; port = [int]$s.port; proxy = ('http://127.0.0.1:' + $s.port); ip = [string]$s.ip; colo = [string]$s.colo })
+      # The instance moved to another slot (its old one went down): the old slot stops naming it.
+      foreach ($m in $nums) {
+        if ($m -eq $n) { continue }
+        $o = Get-Slot $m
+        if (-not $o.owner -or [string]$o.owner.instance -ne $Instance) { continue }
+        $lk = Lock-Slot $m 2000
+        if (-not $lk) { continue }
+        try {
+          $o = Get-Slot $m
+          if ($o.owner -and [string]$o.owner.instance -eq $Instance) { $o.owner = $null; Save-Slot $o }
+        } finally { $lk.Dispose() }
+      }
+      Write-Event 'claim' @{ instance = $Instance; slot = $n; port = [int]$s.port; ownerPid = $(if ($ownerId) { [int]$ownerId.pid } else { 0 }) }
       Write-Host ('claimed slot ' + $n + ' port ' + $s.port + ' for ' + $Instance)
       return 0
     } finally { $lock.Dispose() }
@@ -957,6 +1112,7 @@ function Invoke-Release {
     } finally { $lock.Dispose() }
   }
   Remove-Item -LiteralPath $claimPath -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath (Instance-EgressPath $Instance) -Force -ErrorAction SilentlyContinue
   Write-Host ('released ' + $Instance)
   return 0
 }
@@ -1071,6 +1227,36 @@ function Invoke-Down {
   }
   return 0
 }
+# Plan: two slots with the same IP -> the newer one gets a new identity. v1.0 only marked it
+# 'degraded' (claim then skipped it forever). The lowest slot keeps its IP; an owned duplicate is
+# rotated too, since sharing an IP with another instance is what the pool exists to prevent.
+function Invoke-DaemonDedupe {
+  $byIp = @{}
+  foreach ($s in @(Get-AllSlots | Sort-Object slot)) {
+    if ($Count -ge 1 -and [int]$s.slot -gt $Count) { continue }
+    if ($s.health -notin @('up', 'degraded') -or -not $s.ip) { continue }
+    if (-not (Test-SlotProcess $s)) { continue }
+    $key = [string]$s.ip
+    if (-not $byIp.ContainsKey($key)) { $byIp[$key] = @() }
+    $byIp[$key] += [int]$s.slot
+  }
+  foreach ($ip in @($byIp.Keys)) {
+    $nums = @($byIp[$ip] | Sort-Object)
+    if ($nums.Count -le 1) { continue }
+    foreach ($n in @($nums | Select-Object -Skip 1)) {
+      if (Test-Path -LiteralPath $stopFlag) { return }
+      $lk = Lock-Slot $n 2000
+      if (-not $lk) { continue }
+      try {
+        Write-Event 'collision' @{ slot = $n; ip = $ip; keeps = [int]$nums[0] }
+        $r = Rotate-Slot $n -ForceIdentity -MaxIdentity 1 -WaitSec 25
+        if (-not $r.ok) { Write-Event 'dedupe-failed' @{ slot = $n; ip = $ip } }
+      } catch {
+        Write-Event 'daemon-error' @{ slot = $n; error = $_.Exception.Message }
+      } finally { $lk.Dispose() }
+    }
+  }
+}
 function Invoke-Daemon {
   Ensure-Dirs
   if (Test-Path -LiteralPath $stopFlag) {
@@ -1089,37 +1275,66 @@ function Invoke-Daemon {
     $lock.Flush()
     Write-Event 'daemon-start' @{ pid = $PID; healthSec = $HealthSec }
     $interval = [Math]::Max(5, $HealthSec)
+    $fails = @{}
     while (-not (Test-Path -LiteralPath $stopFlag)) {
-      # Reap expired leases at the start of every cycle. Lease expiry is the only
-      # criterion: owner.pid belongs to the ephemeral claim process, already gone.
+      # Owner-gone claims are freed first (see Invoke-Reap: a live owner is never reaped).
       Invoke-Reap | Out-Null
       foreach ($n in @(Get-SlotNumbers)) {
         if (Test-Path -LiteralPath $stopFlag) { break }
-        $s = Get-Slot $n
-        $m = Measure-Slot $s 8
-        if ($m.ok) {
-          $s.ip = [string]$m.trace.ip
-          $s.colo = [string]$m.trace.colo
-          $s.warp = [string]$m.trace.warp
-          $s.health = 'up'
-          $s.verifiedAt = (Get-Date).ToString('o')
-          Save-Slot $s
-          continue
-        }
-        $alive = Test-SlotProcess $s
-        $age = 0
-        if ($alive) {
-          try { $age = ((Get-Date) - (Get-Process -Id $s.pid).StartTime).TotalSeconds } catch { $age = 0 }
-        }
-        $restart = (-not $alive) -or ($age -gt 60) -or ($m.reason -eq 'warp off') -or ($m.reason -eq 'port closed')
-        if ($restart) {
-          Write-Event 'daemon-restart' @{ slot = $n; reason = $m.reason }
-          try { Start-Slot $n -WaitSec 60 | Out-Null } catch { Write-Event 'daemon-error' @{ slot = $n; error = $_.Exception.Message } }
-        } else {
-          $s.health = 'degraded'
-          Save-Slot $s
-        }
+        # Slots past the configured count (left by an earlier, larger 'up') are not resurrected.
+        if ($Count -ge 1 -and $n -gt $Count) { continue }
+        # Same slot lock as claim/rotate: a rotate in progress is never raced by a restart.
+        $lk = Lock-Slot $n 2000
+        if (-not $lk) { continue }
+        try {
+          $s = Get-Slot $n
+          $m = Measure-Slot $s 8
+          if ($m.ok) {
+            # Measured: the WARP IPv6 exit of a live tunnel moves by itself (same process, new IP
+            # after a rekey). The claim and egress.json follow it so they never show a stale exit.
+            $drift = ($s.ip -and [string]$s.ip -ne [string]$m.trace.ip)
+            if ($drift) { Write-Event 'ip-drift' @{ slot = $n; before = [string]$s.ip; after = [string]$m.trace.ip } }
+            $s.ip = [string]$m.trace.ip
+            $s.colo = [string]$m.trace.colo
+            $s.warp = [string]$m.trace.warp
+            $s.health = 'up'
+            $s.verifiedAt = (Get-Date).ToString('o')
+            Save-Slot $s
+            if ($drift) { Refresh-ClaimIp $n }
+            $fails[$n] = 0
+            continue
+          }
+          $fails[$n] = [int]$fails[$n] + 1
+          $alive = Test-SlotProcess $s
+          # A restart gives the slot a new exit IP under whoever is using it, so one lost trace on a
+          # live tunnel only marks it degraded; the second consecutive failure rebuilds it.
+          $hard = (-not $alive) -or ($m.reason -eq 'warp off') -or ($m.reason -eq 'port closed') -or ($m.reason -eq 'ipv4 egress')
+          if (-not $hard -and $fails[$n] -lt 2) {
+            $s.health = 'degraded'
+            Save-Slot $s
+            continue
+          }
+          # Backoff: after 4 failed cycles only every 4th cycle retries, so a broken network or a
+          # refused registration does not hammer the Cloudflare API every HealthSec.
+          if ($fails[$n] -gt 4 -and ($fails[$n] % 4) -ne 0) {
+            $s.health = $(if ($alive) { 'degraded' } else { 'down' })
+            Save-Slot $s
+            continue
+          }
+          Write-Event 'daemon-restart' @{ slot = $n; reason = $m.reason; fails = [int]$fails[$n] }
+          $r = Start-Slot $n -WaitSec 30
+          # The same identity keeps failing: a fresh wgcf device (a manual .conf in WgDir still wins).
+          if (-not $r.ok -and ($fails[$n] % 4) -eq 0) {
+            Write-Event 'daemon-new-identity' @{ slot = $n; reason = $r.reason }
+            $r = Start-Slot $n -NewIdentity -WaitSec 30
+          }
+          if ($r.ok) { $fails[$n] = 0; Refresh-ClaimIp $n }
+          else { Write-Event 'daemon-restart-failed' @{ slot = $n; reason = $r.reason } }
+        } catch {
+          Write-Event 'daemon-error' @{ slot = $n; error = $_.Exception.Message }
+        } finally { $lk.Dispose() }
       }
+      Invoke-DaemonDedupe
       $slots = @(Get-AllSlots)
       Update-Uniqueness $slots
       $slots = @(Get-AllSlots)
@@ -1133,11 +1348,14 @@ function Invoke-Daemon {
 }
 function Invoke-Reap {
   Ensure-Dirs
-  # owner.pid/ticks identify the short-lived PowerShell process that ran 'claim' (already
-  # exited). They are NOT a liveness signal: using them would release every active claim.
-  # The ONLY reap criterion is lease expiry: 'at' older than LeaseMin minutes. Claim
-  # preserves 'at' when the same instance re-claims the same slot, so a live claim
-  # effectively never expires -- do not add pid-based death checks here by mistake.
+  # Plan: reap frees a slot whose owner died. Since v1.1 a claim names its owner as a long-lived
+  # process (launcher window cmd.exe or the dispatcher) by pid + start ticks:
+  #   owner alive  -> never reaped, however old the claim is;
+  #   owner gone   -> reaped now;
+  #   owner unknown (claim from v1.0, owner = the short-lived claim PowerShell) -> lease rule:
+  #   'renewedAt' (or 'at') older than LeaseMin minutes.
+  # v1.0 reaped on 'at' alone, and 'at' is kept on re-claim, so every live claim was dropped
+  # after LeaseMin minutes and a second window could take the same slot and the same IP.
   $released = 0
   $now = Get-Date
   $handled = @{}
@@ -1153,8 +1371,15 @@ function Invoke-Reap {
     $handled[$n] = $true
     $s = Get-Slot $n
     $expired = $false
-    if ($LeaseMin -gt 0 -and $c.at) {
-      try { if (($now - [DateTime]::Parse([string]$c.at)).TotalMinutes -gt $LeaseMin) { $expired = $true } } catch { }
+    $reason = 'lease'
+    $alive = $null
+    if ($c.PSObject.Properties['owner']) { $alive = Test-OwnerAlive $c.owner }
+    if ($alive -eq $true) { continue }
+    if ($alive -eq $false) { $expired = $true; $reason = 'owner-gone' }
+    elseif ($LeaseMin -gt 0) {
+      $stamp = [string]$c.at
+      if ($c.PSObject.Properties['renewedAt'] -and $c.renewedAt) { $stamp = [string]$c.renewedAt }
+      if ($stamp) { try { if (($now - [DateTime]::Parse($stamp)).TotalMinutes -gt $LeaseMin) { $expired = $true } } catch { } }
     }
     if ($expired) {
       $lock = Lock-Slot $n 2000
@@ -1165,17 +1390,23 @@ function Invoke-Reap {
         } finally { $lock.Dispose() }
       }
       Remove-Item -LiteralPath $cf.FullName -Force -ErrorAction SilentlyContinue
+      if ($c.instance) { Remove-Item -LiteralPath (Instance-EgressPath ([string]$c.instance)) -Force -ErrorAction SilentlyContinue }
       $released++
-      Write-Event 'reap' @{ instance = [string]$c.instance; slot = $n; reason = 'lease' }
+      Write-Event 'reap' @{ instance = [string]$c.instance; slot = $n; reason = $reason }
     }
   }
   foreach ($n in @(Get-SlotNumbers)) {
     if ($handled.ContainsKey($n)) { continue }
     $s = Get-Slot $n
     if (-not $s.owner -or -not $s.owner.instance) { continue }
-    $expired = $false
-    if ($LeaseMin -gt 0 -and $s.owner.at) {
-      try { if (($now - [DateTime]::Parse([string]$s.owner.at)).TotalMinutes -gt $LeaseMin) { $expired = $true } } catch { }
+    # Owner recorded on the slot but no claim file: same rule, owner process first.
+    $alive = Test-OwnerAlive $s.owner
+    if ($alive -eq $true) { continue }
+    $expired = ($alive -eq $false)
+    if ($null -eq $alive -and $LeaseMin -gt 0) {
+      $stamp = [string]$s.owner.at
+      if ($s.owner.PSObject.Properties['renewedAt'] -and $s.owner.renewedAt) { $stamp = [string]$s.owner.renewedAt }
+      if ($stamp) { try { if (($now - [DateTime]::Parse($stamp)).TotalMinutes -gt $LeaseMin) { $expired = $true } } catch { } }
     }
     if ($expired) {
       $lock = Lock-Slot $n 2000
