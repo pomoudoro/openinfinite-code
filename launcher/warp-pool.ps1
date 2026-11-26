@@ -8,8 +8,13 @@
 # Never prints PrivateKey or PresharedKey.
 [CmdletBinding()]
 param(
-  [ValidateSet('up','status','claim','release','rotate','verify','down','daemon','reap')]
+  [ValidateSet('up','status','claim','release','rotate','verify','down','daemon','reap','grow','boot','spawn','stats')]
   [string]$Action = 'status',
+  # spawn: the action the detached process runs (boot or daemon).
+  [ValidateSet('boot','daemon')]
+  [string]$Then = 'daemon',
+  # grow: the pool never grows past this many slots.
+  [int]$Max = 0,
   [int]$Count = 0,
   [int]$Slot = 0,
   [string]$Instance = '',
@@ -25,7 +30,8 @@ param(
   [int]$LeaseMin = 0,
   [int]$BurnedTtlHours = 0,
   [string]$WgDir = '',
-  [string]$TraceUrl = 'https://www.cloudflare.com/cdn-cgi/trace'
+  # The API host itself (opencode.ai has AAAA): a passing trace proves the API sees the slot's IP.
+  [string]$TraceUrl = 'https://opencode.ai/cdn-cgi/trace'
 )
 $ErrorActionPreference = 'Stop'
 
@@ -41,8 +47,9 @@ $PeerEndpoint = '162.159.192.1:2408'
 # answered on all of these; 162.159.193.1:2408 did not. A rebuilt slot moves to the next one, so
 # an endpoint that stopped answering the slot's handshakes is not retried in a loop.
 $PeerEndpoints = @('162.159.192.1:2408', '188.114.97.1:2408', '162.159.195.1:2408', '162.159.192.1:4500', '188.114.96.1:500')
-$ScriptVersion = '1.1'
+$ScriptVersion = '1.2'
 
+$SelfPath = $MyInvocation.MyCommand.Path
 $State = [IO.Path]::GetFullPath($State)
 $poolDir = Join-Path $State 'pool'
 $claimsDir = Join-Path $poolDir 'claims'
@@ -78,14 +85,27 @@ if (-not $PSBoundParameters.ContainsKey('BurnedTtlHours')) { $BurnedTtlHours = [
 if (-not $PSBoundParameters.ContainsKey('WgDir')) { $WgDir = [string](CfgVal 'WPOOL_WG_DIR' '') }
 $RotateMode = [string](CfgVal 'WPOOL_ROTATE_MODE' 'reconnect')
 $VerifyProbe = [int](CfgVal 'WPOOL_VERIFY_PROBE' 0)
-# Measured on this project's target host: wireproxy inside a connected WARP client still gets a
-# distinct per-device IPv6 per slot, so stacking is allowed by default. 0 restores the plan's
-# strict rule (up refuses with exit 6 while warp-cli reports Connected).
+# Only the WARP app in TUNNEL mode can capture the slots' UDP (plan, limit 1). In proxy mode
+# (warp-cli "Mode: WarpProxy", the setup this project uses) the slots go out by the normal route
+# and never touch it, so proxy mode is always allowed. WPOOL_ALLOW_WARP_TUNNEL=1 (default) also
+# allows tunnel mode; 0 makes 'up' refuse with exit 6 while the app is connected in tunnel mode.
 # The launcher exports its effective value; config.json is the fallback for POOL.bat / manual runs.
 $allowCfg = [string]$env:WPOOL_ALLOW_WARP_TUNNEL
 if ($allowCfg -notmatch '^[01]$') { $allowCfg = [string](CfgVal 'WPOOL_ALLOW_WARP_TUNNEL' 1) }
 if (-not $AllowWarpTunnel -and $allowCfg -eq '1') { $AllowWarpTunnel = [switch]$true }
-if (-not $TraceUrl) { $TraceUrl = 'https://www.cloudflare.com/cdn-cgi/trace' }
+if (-not $TraceUrl) { $TraceUrl = 'https://opencode.ai/cdn-cgi/trace' }
+# 64 = two slots whose exit IPv6 share the first 64 bits count as the same exit (dedupe, burned,
+# collision). 0 (default) = the full address. Turn on if 'stats' shows the limit follows the /64.
+function EnvOrCfgInt([string]$name, [int]$default) {
+  $e = [string][Environment]::GetEnvironmentVariable($name)
+  if ($e -match '^\d+$') { return [int]$e }
+  return [int](CfgVal $name $default)
+}
+$DedupePrefix = EnvOrCfgInt 'WPOOL_DEDUPE_PREFIX' 0
+if ($DedupePrefix -ne 64) { $DedupePrefix = 0 }
+if (-not $PSBoundParameters.ContainsKey('Max')) { $Max = EnvOrCfgInt 'WPOOL_MAX' 8 }
+if ($Max -lt 1) { $Max = 8 }
+if ($Max -gt 16) { $Max = 16 }
 
 function Ensure-Dirs {
   foreach ($d in @($State, $poolDir, $claimsDir, $egressDir)) {
@@ -350,13 +370,46 @@ function Measure-Slot($s, [int]$timeoutSec = 8) {
   if ($t.warp -ne 'on') { return @{ ok = $false; reason = 'warp off'; trace = $t } }
   return @{ ok = $true; reason = ''; trace = $t }
 }
+# First 64 bits of an IPv6 exit ("2a09:bac1:1120:36a8"); '' for IPv4 or garbage.
+function Get-Prefix64([string]$ip) {
+  if (-not $ip -or $ip -notlike '*:*') { return '' }
+  try {
+    $b = ([Net.IPAddress]::Parse($ip)).GetAddressBytes()
+    $h = @()
+    for ($i = 0; $i -lt 8; $i += 2) { $h += ('{0:x}' -f (([int]$b[$i] -shl 8) -bor [int]$b[$i + 1])) }
+    return ($h -join ':')
+  } catch { return '' }
+}
+# What counts as "the same exit": the full IP, or its /64 with WPOOL_DEDUPE_PREFIX=64.
+function UniqKey([string]$ip) {
+  if ($DedupePrefix -eq 64) { $p = Get-Prefix64 $ip; if ($p) { return ($p + '::/64') } }
+  return $ip
+}
 function Update-Uniqueness($slots) {
   $seen = @{}
   foreach ($s in @($slots | Sort-Object slot)) {
     if ($s.health -eq 'up' -and $s.ip) {
-      if ($seen.ContainsKey([string]$s.ip)) { $s.health = 'degraded'; Save-Slot $s }
-      else { $seen[[string]$s.ip] = [int]$s.slot }
+      $key = UniqKey ([string]$s.ip)
+      if ($seen.ContainsKey($key)) { $s.health = 'degraded'; Save-Slot $s }
+      else { $seen[$key] = [int]$s.slot }
     }
+  }
+}
+# Plan item 8: slots past the configured count (left by an earlier, larger 'up' or 'grow') are
+# stopped and their folders removed, unless a live window or dispatcher still holds them.
+function Invoke-RetireExtra([int]$keep) {
+  foreach ($n in @(Get-SlotNumbers)) {
+    if ($n -le $keep) { continue }
+    $s = Get-Slot $n
+    if ((Test-OwnerAlive $s.owner) -eq $true) { continue }
+    $lk = Lock-Slot $n 2000
+    if (-not $lk) { continue }
+    try { Stop-SlotProcess $n | Out-Null } finally { $lk.Dispose() }
+    try {
+      Remove-Item -LiteralPath (SlotDir $n) -Recurse -Force -ErrorAction Stop
+      Remove-Item -LiteralPath (Join-Path $poolDir ((SlotName $n) + '.lock')) -Force -ErrorAction SilentlyContinue
+      Write-Event 'slot-retired' @{ slot = $n; keep = $keep }
+    } catch { Write-Event 'slot-retire-error' @{ slot = $n; error = $_.Exception.Message } }
   }
 }
 function Write-PoolStatus($slots) {
@@ -554,7 +607,14 @@ function Test-WarpConnected {
     $txt = $txt -replace '\x1b\[[0-9;]*m', ''
     # warp-cli 2024+ prints "Status update: Connected"; older builds print "Status: Connected"
     # or a bare "Connected". "Disconnected"/"Connecting" must not match.
-    return ($txt -match '(?im)^\s*(Status(\s+update)?\s*:\s*)?Connected\b')
+    if ($txt -notmatch '(?im)^\s*(Status(\s+update)?\s*:\s*)?Connected\b') { return $false }
+    # Connected in proxy mode ("Mode: WarpProxy on port 40000") captures nothing: not a tunnel.
+    $p2 = Start-Process -FilePath $wc -ArgumentList @('--accept-tos', 'settings') -WindowStyle Hidden -PassThru -RedirectStandardOutput $out -RedirectStandardError $err
+    if (-not $p2.WaitForExit(8000)) { try { Stop-Process -Id $p2.Id -Force -ErrorAction SilentlyContinue } catch { }; return $true }
+    $set = ''
+    if (Test-Path -LiteralPath $out) { $set = [IO.File]::ReadAllText($out) -replace '\x1b\[[0-9;]*m', '' }
+    if ($set -match '(?im)Mode:\s*WarpProxy') { return $false }
+    return $true
   } catch { return $false }
   finally {
     Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
@@ -809,12 +869,13 @@ function Get-BurnedIps($s) {
 function Wait-SlotHealthy([int]$n, [int]$seconds, [string[]]$avoid = @()) {
   $end = (Get-Date).AddSeconds($seconds)
   $last = $null
+  $avoidKeys = @($avoid | Where-Object { $_ } | ForEach-Object { UniqKey ([string]$_) })
   while ((Get-Date) -lt $end) {
     $s = Get-Slot $n
     if (-not (Test-SlotProcess $s)) { return @{ ok = $false; reason = 'process dead'; trace = $null } }
     $m = Measure-Slot $s 8
     if ($m.ok) {
-      if (@($avoid | Where-Object { $_ }).Count -eq 0 -or $avoid -notcontains [string]$m.trace.ip) { return $m }
+      if ($avoidKeys.Count -eq 0 -or $avoidKeys -notcontains (UniqKey ([string]$m.trace.ip))) { return $m }
       $last = $m
     }
     Start-Sleep -Milliseconds 1000
@@ -903,6 +964,21 @@ function Rotate-Slot([int]$n, [switch]$ForceIdentity, [int]$MaxIdentity = 2, [in
   }
   $s = Get-Slot $n
   $s.rotations = [int]$s.rotations + 1
+  # Plan item 6: one line per rotation with the /64 of both exits and how long the old exit
+  # lasted. 'stats' reads it to tell an IP-based limit from a range-based one.
+  $lived = -1
+  if ($s.PSObject.Properties['ipSince'] -and $s.ipSince) { try { $lived = [int]((Get-Date) - [DateTime]::Parse([string]$s.ipSince)).TotalSeconds } catch { } }
+  $ownerName = ''
+  if ($s.owner -and $s.owner.instance) { $ownerName = [string]$s.owner.instance }
+  try {
+    $line = ConvertTo-Json -Compress -InputObject ([ordered]@{
+      at = (Get-Date).ToString('o'); slot = $n; owner = $ownerName; ok = [bool]$success;
+      before = $oldIp; beforePrefix = (Get-Prefix64 $oldIp); after = $lastIp; afterPrefix = (Get-Prefix64 $lastIp);
+      livedSec = $lived; endpoint = [string]$s.endpoint })
+    [IO.File]::AppendAllText((Join-Path $poolDir 'rotation-history.jsonl'), $line + "`r`n", (New-Object Text.UTF8Encoding($false)))
+  } catch { }
+  if ($s.PSObject.Properties['ipSince']) { $s.ipSince = (Get-Date).ToString('o') }
+  else { $s | Add-Member -NotePropertyName ipSince -NotePropertyValue ((Get-Date).ToString('o')) }
   if ($success) {
     $s.health = 'up'
     Write-Event 'rotate' @{ slot = $n; before = $oldIp; after = $lastIp }
@@ -926,19 +1002,35 @@ function Invoke-Up {
   if (-not $upLock) { Write-Host 'another up is still running after 10 minutes'; return 4 }
   try { return (Invoke-UpLocked) } finally { $upLock.Dispose() }
 }
+function Write-UpProgress([int]$done, [int]$total, [string]$what) {
+  try { Write-Json (Join-Path $poolDir 'up-progress.json') ([ordered]@{ done = $done; total = $total; what = $what; at = (Get-Date).ToString('o') }) } catch { }
+}
+# A slot past the configured count that a live window or dispatcher still uses (it was added by
+# 'grow') keeps the count up to it, so 'up' never retires a tunnel in use.
+function Get-EffectiveCount([int]$configured) {
+  $eff = $configured
+  foreach ($s in @(Get-AllSlots)) {
+    if ([int]$s.slot -le $eff) { continue }
+    if ((Test-OwnerAlive $s.owner) -eq $true) { $eff = [int]$s.slot }
+  }
+  return $eff
+}
 function Invoke-UpLocked {
+  $Count = Get-EffectiveCount $Count
   # Persist the effective base/count so every later action without explicit parameters reuses it.
   Write-Json $poolConfigFile ([ordered]@{ portBase = [int]$PortBase; count = [int]$Count; writtenAt = (Get-Date).ToString('o') })
   if (Test-Path -LiteralPath $stopFlag) { Remove-Item -LiteralPath $stopFlag -Force -ErrorAction SilentlyContinue }
   $warpUp = Test-WarpConnected
   if ($warpUp -and -not $AllowWarpTunnel) {
-    Write-Host 'warp-cli reports Connected; disconnect WARP or set WPOOL_ALLOW_WARP_TUNNEL=1 (or pass -AllowWarpTunnel)'
-    Write-Event 'warp-client-refused' @{ connected = $true }
+    Write-Host 'the WARP app is connected in tunnel mode; disconnect it, switch it to proxy mode, or set WPOOL_ALLOW_WARP_TUNNEL=1'
+    Write-Event 'warp-client-refused' @{ tunnelMode = $true }
     return 6
   }
-  if ($warpUp) { Write-Event 'warp-client-stacked' @{ connected = $true; note = 'slots run inside the WARP client tunnel' } }
+  if ($warpUp) { Write-Event 'warp-client-stacked' @{ tunnelMode = $true; note = 'slots run inside the WARP app tunnel' } }
+  Write-UpProgress 0 $Count 'binaries'
   Ensure-Bins | Out-Null
   for ($n = 1; $n -le $Count; $n++) {
+    Write-UpProgress ($n - 1) $Count ('slot ' + $n)
     # The daemon of another window may be restarting this slot right now: wait for its lock.
     $lk = Lock-Slot $n 90000
     if (-not $lk) { Write-Host ('slot ' + $n + ' is locked by another pool action; skipped'); continue }
@@ -986,11 +1078,14 @@ function Invoke-UpLocked {
       }
     } finally { $lk.Dispose() }
   }
+  Write-UpProgress $Count $Count 'dedupe'
   for ($t = 1; $t -le [Math]::Max(1, $DedupeTries); $t++) {
-    $ips = @(Get-AllSlots | Where-Object { [int]$_.slot -le $Count -and $_.health -eq 'up' -and $_.ip } | ForEach-Object { [string]$_.ip })
+    $ips = @(Get-AllSlots | Where-Object { [int]$_.slot -le $Count -and $_.health -eq 'up' -and $_.ip } | ForEach-Object { UniqKey ([string]$_.ip) })
     if ($ips.Count -eq @($ips | Sort-Object -Unique).Count) { break }
     Invoke-DaemonDedupe
   }
+  Invoke-RetireExtra $Count
+  Write-UpProgress $Count $Count 'done'
   $slots = @(Get-AllSlots)
   Update-Uniqueness $slots
   $slots = @(Get-AllSlots)
@@ -1199,12 +1294,12 @@ function Invoke-Verify {
   $seen = @{}
   foreach ($s in @($slots | Sort-Object slot)) {
     if ($s.health -eq 'up' -and $s.ip) {
-      if ($seen.ContainsKey([string]$s.ip)) {
+      if ($seen.ContainsKey((UniqKey ([string]$s.ip)))) {
         $s.health = 'degraded'
         Save-Slot $s
         $bad = $true
         Write-Host ('slot ' + $s.slot + ': duplicate ip ' + $s.ip)
-      } else { $seen[[string]$s.ip] = [int]$s.slot }
+      } else { $seen[(UniqKey ([string]$s.ip))] = [int]$s.slot }
     }
   }
   $slots = @(Get-AllSlots)
@@ -1251,7 +1346,7 @@ function Invoke-DaemonDedupe {
     if ($Count -ge 1 -and [int]$s.slot -gt $Count) { continue }
     if ($s.health -notin @('up', 'degraded') -or -not $s.ip) { continue }
     if (-not (Test-SlotProcess $s)) { continue }
-    $key = [string]$s.ip
+    $key = UniqKey ([string]$s.ip)
     if (-not $byIp.ContainsKey($key)) { $byIp[$key] = @() }
     $byIp[$key] += [int]$s.slot
   }
@@ -1292,6 +1387,10 @@ function Invoke-Daemon {
     $interval = [Math]::Max(5, $HealthSec)
     $fails = @{}
     while (-not (Test-Path -LiteralPath $stopFlag)) {
+      # 'grow' raises the persisted count while the daemon runs: follow it, so a slot added for a
+      # fifth window is watched like the others.
+      $pc = Read-Json $poolConfigFile
+      if ($pc -and $pc.PSObject.Properties['count']) { try { if ([int]$pc.count -ge 1) { $Count = [int]$pc.count } } catch { } }
       # Owner-gone claims are freed first (see Invoke-Reap: a live owner is never reaped).
       Invoke-Reap | Out-Null
       foreach ($n in @(Get-SlotNumbers)) {
@@ -1456,10 +1555,100 @@ function Invoke-Reap {
   return 0
 }
 
+# Plan item 2: every slot is taken -> one more slot, up to WPOOL_MAX. Shares the 'up' lock, so it
+# never races a boot. Exit 0 = the new slot is up, 8 = already at WPOOL_MAX, 3 = it did not come up.
+function Invoke-Grow {
+  Ensure-Dirs
+  $upLock = Lock-Pool 'up' 120000
+  if (-not $upLock) { Write-Host 'pool is busy (up running)'; return 4 }
+  try {
+    $n = [int]$Count + 1
+    if ($n -gt $Max) { Write-Host ('pool is at WPOOL_MAX (' + $Max + ')'); Write-Event 'grow-refused' @{ count = [int]$Count; max = $Max }; return 8 }
+    if (($PortBase + $n) -gt 65535) { Write-Host 'bad PortBase/Count'; return 1 }
+    $Count = $n
+    Write-Json $poolConfigFile ([ordered]@{ portBase = [int]$PortBase; count = [int]$Count; writtenAt = (Get-Date).ToString('o') })
+    Ensure-Bins | Out-Null
+    $ok = $false
+    $lk = Lock-Slot $n 30000
+    if ($lk) {
+      try {
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+          $r = Start-Slot $n -NewIdentity:($attempt -ge 3) -NextEndpoint:($attempt -ge 2) -WaitSec 25
+          if ($r.ok) { $ok = $true; break }
+        }
+      } finally { $lk.Dispose() }
+    }
+    Write-Event 'grow' @{ slot = $n; ok = $ok; max = $Max }
+    $slots = @(Get-AllSlots)
+    Update-Uniqueness $slots
+    Write-PoolStatus @(Get-AllSlots)
+    Write-Host ('slot ' + $n + $(if ($ok) { ' added' } else { ' did not come up' }))
+    if ($ok) { return 0 }
+    return 3
+  } finally { $upLock.Dispose() }
+}
+# Plan item 3: what the launcher used to run inline in its own console. Holds startup.lock, runs
+# 'up', writes pool\up.rc for the waiting window, then becomes the daemon. Started by 'spawn',
+# so it outlives the window that booted the pool.
+function Invoke-Boot {
+  Ensure-Dirs
+  $h = $null
+  try { $h = [IO.File]::Open((Join-Path $poolDir 'startup.lock'), [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+  catch { Write-Host 'another boot is running'; return 0 }
+  try {
+    $rc = 1
+    try { $res = @(Invoke-Up); $rc = [int]$res[-1] } catch { $rc = 1; Write-Event 'error' @{ action = 'boot-up'; error = $_.Exception.Message } }
+    try { [IO.File]::WriteAllText((Join-Path $poolDir 'up.rc'), [string]$rc) } catch { }
+    if (@(0, 2, 3) -contains $rc) { return (Invoke-Daemon) }
+    return $rc
+  } finally { if ($h) { $h.Dispose() } }
+}
+# Starts 'boot' or 'daemon' as a detached process (no console, no inherited handles, out of the
+# caller's job) and returns at once.
+function Invoke-Spawn {
+  Ensure-Dirs
+  Ensure-Detached
+  $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  $a = '-NoProfile -ExecutionPolicy Bypass -File "' + $SelfPath + '" -Action ' + $Then + ' -State "' + $State + '" -HealthSec ' + $HealthSec
+  if ($Then -eq 'boot') {
+    $a += ' -Count ' + $Count + ' -PortBase ' + $PortBase + ' -DedupeTries ' + $DedupeTries + ' -LeaseMin ' + $LeaseMin + ' -BurnedTtlHours ' + $BurnedTtlHours
+  }
+  if ($Force) { $a += ' -Force' }
+  if ($AllowWarpTunnel) { $a += ' -AllowWarpTunnel' }
+  $newPid = [OpenInfinite.Detached]::Start($ps, $a, $State)
+  Write-Event 'spawn' @{ then = $Then; pid = $newPid }
+  Write-Host ('spawned ' + $Then + ' pid ' + $newPid)
+  return 0
+}
+# Plan item 6: is the free limit per IP or per range? Reads pool\rotation-history.jsonl.
+function Invoke-Stats {
+  Ensure-Dirs
+  $hist = Join-Path $poolDir 'rotation-history.jsonl'
+  if (-not (Test-Path -LiteralPath $hist)) { Write-Host 'no rotations recorded yet'; return 0 }
+  $rows = @(Get-Content -LiteralPath $hist -Encoding UTF8 | Where-Object { $_.Trim() } | ForEach-Object { try { $_ | ConvertFrom-Json } catch { } } | Where-Object { $_ })
+  $quick = 180
+  $byPrefix = @($rows | Where-Object { $_.beforePrefix } | Group-Object beforePrefix | ForEach-Object {
+    $lived = @($_.Group | Where-Object { [int]$_.livedSec -ge 0 } | ForEach-Object { [int]$_.livedSec } | Sort-Object)
+    $med = -1; if ($lived.Count) { $med = $lived[[int][Math]::Floor($lived.Count / 2)] }
+    [pscustomobject]@{ Prefix = $_.Name; Rotations = $_.Count; QuickRepeats = @($lived | Where-Object { $_ -lt $quick }).Count; MedianLivedSec = $med }
+  } | Sort-Object Rotations -Descending)
+  Write-Host ('rotations recorded: ' + $rows.Count + '   distinct /64 left: ' + $byPrefix.Count)
+  $byPrefix | Select-Object -First 15 | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+  $quickTotal = @($rows | Where-Object { [int]$_.livedSec -ge 0 -and [int]$_.livedSec -lt $quick }).Count
+  $sharedQuick = @($byPrefix | Where-Object { $_.QuickRepeats -ge 2 }).Count
+  Write-Host ('exits left within ' + $quick + ' s: ' + $quickTotal + '   /64 with 2+ quick repeats: ' + $sharedQuick)
+  if ($sharedQuick -ge 2 -and $DedupePrefix -ne 64) { Write-Host 'hint: the limit seems to follow the /64; try WPOOL_DEDUPE_PREFIX=64' }
+  return 0
+}
+
 try {
   Ensure-Dirs
   $code = 0
   switch ($Action) {
+    'grow' { $code = Invoke-Grow }
+    'boot' { $code = Invoke-Boot }
+    'spawn' { $code = Invoke-Spawn }
+    'stats' { $code = Invoke-Stats }
     'up' { $code = Invoke-Up }
     'status' { $code = Invoke-Status }
     'claim' { $code = Invoke-Claim }

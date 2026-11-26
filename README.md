@@ -99,15 +99,22 @@ O pool cria **N túneis WARP** com **um proxy local por slot**: cada instância 
 - Cada slot tem identidade wgcf própria, um `wireproxy` e um proxy HTTP local na porta `WPOOL_PORT_BASE + número do slot` (slot 1 usa `base+1`).
 - O IPv4 free do WARP é CGNAT compartilhado: todos os devices saem pelo mesmo IPv4. O pool usa o **IPv6 por device** para distinguir as saídas; por isso um slot só é aceito se o trace retornar IPv6 e `warp=on`.
 - O perfil é normalizado com `::/0` no `AllowedIPs`, `DNS = 1.1.1.1` e peer literal `162.159.192.1:2408` (o hostname `engage.cloudflareclient.com` resolve AAAA primeiro e o handshake morre neste host).
-- O perfil ganha `PersistentKeepalive = 25`: slot parado não perde o mapeamento UDP do roteador (nem do túnel do app WARP).
-- O launcher é o provider de `EGRESS=WIREGUARD`: cada janela faz `claim` do menor slot livre, `rotate` só do seu slot e `release` ao fechar. O pool não mexe no Desktop nem em outros egress — uma janela em WARP, Tor ou lista de proxies continua no seu egress (o `launcher.log` avisa: `only a WireGuard window takes a pool slot`).
+- O perfil ganha `PersistentKeepalive = 25`: slot parado não perde o mapeamento UDP do roteador.
+- O launcher é o provider de `EGRESS=WIREGUARD`: cada janela faz `claim` do menor slot livre, `rotate` só do seu slot e `release` ao fechar.
+- **Uma janela = um servidor próprio (v2.63):** no modo CLI, a janela do pool abre o OpenCode com `--standalone`, um servidor privado nascido com o proxy do seu túnel, e nunca reinicia o serviço de fundo compartilhado. Antes, cada janela reiniciava esse serviço com o próprio proxy e a última a abrir levava todas (e o Desktop) para o seu IP.
+- **Desktop é um só (v2.63):** o app Desktop abre uma vez por máquina e fica com o serviço compartilhado. Com `MULTI_INSTANCE=1`, se outra janela do launcher já abriu o Desktop, a nova janela avisa e abre o OpenCode no terminal (CLI), com túnel próprio.
+- **Todos os túneis ocupados (v2.63):** a janela pede mais um túnel (`-Action grow`, até `WPOOL_MAX`, padrão 8) e espera até ~1 min por um livre. Se nada vagar, ela sai pelo **WARP**, nunca direto pelo IP de casa. A fila faz o mesmo: o pedido continua na fila em vez de virar `failed_other`. O pool não mexe no Desktop nem em outros egress — uma janela em WARP, Tor ou lista de proxies continua no seu egress (o `launcher.log` avisa: `only a WireGuard window takes a pool slot`).
 - **Dono do claim:** o claim registra o processo que ficou vivo (a janela `cmd.exe` do launcher ou o dispatcher), por PID + horário de início. Enquanto ele vive, o slot é dele; quando ele fecha, `reap` (ou o próximo `claim`) libera. `WPOOL_LEASE_MIN` só vale para claims antigos, sem dono registrado.
 - `pool\pool-status.json` guarda `up`, `distinct`, `portBase` e a tabela de slots; `pool\claims\<instância>.json` guarda `instance/slot/port/proxy/ip/owner`; `instances\<instância>\egress.json` diz por onde aquela instância sai; `pool-config.json` fixa `portBase`/`count` para os comandos seguintes não trocarem de base.
 - Cada `wireproxy` nasce destacado (sem herdar handles nem console, fora do job de quem chamou): fechar a janela que subiu o pool não derruba os slots, e quem chama o script por pipe não fica esperando.
 - `up` tem trava própria (`pool\up.lock`) e cada ação pega o lock do slot (`pool\slotNN.lock`): dois `up`, o daemon e um `rotate` nunca sobem dois `wireproxy` na mesma porta. Porta ocupada por outro programa falha o slot em vez de medir o proxy alheio.
 - O daemon checa saúde a cada `WPOOL_HEALTH_SEC`. Um trace perdido só marca `degraded`; a segunda falha seguida reconstrói o slot (processo morto, `warp=off` ou porta fechada reconstroem na hora). Falhas repetidas têm backoff e, a cada 4 ciclos, tentam identidade nova. Colisão de IP gira o slot mais novo. `down` grava `stop.flag` para o daemon não ressuscitar os túneis.
 - **Medido:** o IPv6 de saída de um túnel vivo muda sozinho de tempos em tempos (mesmo processo, IP novo depois de um rehandshake). Os slots continuam com IPs distintos entre si; o daemon registra `ip-drift` e atualiza claim e `egress.json`.
-- **App WARP conectado:** com `WPOOL_ALLOW_WARP_TUNNEL=1` (padrão) o pool roda por dentro do túnel do app, e cada slot mantém o próprio IPv6 (medido: 5 MB a ~15 MB/s, `opencode.ai` vê o IPv6 do slot). Com `0`, o `up` recusa com exit 6 enquanto o `warp-cli` disser `Connected`.
+- **App WARP:** em **modo proxy** (`warp-cli settings` → `Mode: WarpProxy`, como neste projeto) os túneis do pool saem pela rota normal e nunca passam pelo app: não há conflito. Só o **modo túnel** pode capturar o UDP do pool; com `WPOOL_ALLOW_WARP_TUNNEL=0` o `up` recusa (exit 6) enquanto o app estiver conectado em modo túnel. Medido: 5 MB a ~15 MB/s e upload de 2 MB em 0,6 s por um slot; `opencode.ai` vê o IPv6 do slot.
+- **Checagem no host da API (v2.63):** o trace do pool e o pré-voo da fila usam `https://opencode.ai/cdn-cgi/trace`, o mesmo host da API: um slot aprovado prova que o OpenCode vê o IP daquele túnel.
+- **Vigia destacado (v2.63):** o boot (`up` + `daemon`) nasce com `-Action spawn`, fora do console da janela. Fechar a janela que subiu o pool não derruba mais o vigia.
+- **Limite por IP ou por faixa? (v2.63):** cada rotação grava `pool\rotation-history.jsonl` com o `/64` do IP antigo e do novo e quanto tempo o antigo durou. `-Action stats` resume isso; se o limite voltar rápido na mesma faixa, ele sugere `WPOOL_DEDUPE_PREFIX=64` (dois túneis com o mesmo `/64` passam a contar como o mesmo IP).
+- **Limpeza (v2.63):** túneis acima da quantidade configurada são parados e apagados no `up`, a menos que uma janela viva ainda os use. A primeira subida mostra o progresso (`pool\up-progress.json`).
 - **Limitação:** destino IPv4-only sai pelo IPv4 compartilhado (CGNAT); IP próprio por instância exige IPv6 no destino (`opencode.ai` tem AAAA).
 
 ### Como rodar
@@ -124,9 +131,11 @@ powershell ... -File warp-pool.ps1 -Action rotate -Slot 1
 powershell ... -File warp-pool.ps1 -Action down
 ```
 
-Listar todas as ações: `up|status|claim|release|rotate|verify|down|daemon|reap`. `-State` aponta a raiz do estado (padrão: `%LOCALAPPDATA%\opencode-infinite`), `-Slot` escolhe o slot no `rotate` e no `down` parcial, `-Instance` identifica a janela no `claim`/`release`. `-Force` no `rotate` gera identidade nova em vez de só reconectar. `-OwnerPid` no `claim` diz qual processo é o dono (padrão: quem chamou o script). `-AllowWarpTunnel` força o `up` com o app WARP conectado mesmo com `WPOOL_ALLOW_WARP_TUNNEL=0`.
+Listar todas as ações: `up|status|claim|release|rotate|verify|down|daemon|reap|grow|boot|spawn|stats`. `grow` abre mais um túnel (até `-Max`/`WPOOL_MAX`); `spawn -Then boot|daemon` inicia o boot ou o vigia destacado; `stats` mostra o histórico de rotações por faixa `/64`. `-State` aponta a raiz do estado (padrão: `%LOCALAPPDATA%\opencode-infinite`), `-Slot` escolhe o slot no `rotate` e no `down` parcial, `-Instance` identifica a janela no `claim`/`release`. `-Force` no `rotate` gera identidade nova em vez de só reconectar. `-OwnerPid` no `claim` diz qual processo é o dono (padrão: quem chamou o script). `-AllowWarpTunnel` força o `up` com o app WARP conectado mesmo com `WPOOL_ALLOW_WARP_TUNNEL=0`.
 
-Códigos de saída: `0` ok, `2` sem IP novo/distinto, `3` slot ou processo morto, `4` trava ocupada, `6` app WARP conectado e não permitido, `7` nenhum slot livre.
+Códigos de saída: `0` ok, `2` sem IP novo/distinto, `3` slot ou processo morto, `4` trava ocupada, `6` app WARP em modo túnel e não permitido, `7` nenhum slot livre, `8` pool já no máximo (`WPOOL_MAX`).
+
+Memória medida (máquina com 63 GB): cada túnel ~28 MB físicos (~65 MB reservados), o Desktop ~1,2 GB (app + serviço), o vigia ~130 MB. Uma janela CLI deve ficar perto de 0,6 GB (estimativa pelo serviço do OpenCode). 8 túneis com 1 Desktop + 7 CLI dão ~6 GB; o limite prático é o Cloudflare e a sua internet, não a RAM.
 
 Pool de CLIs em paralelo:
 
@@ -252,6 +261,19 @@ openinfinite-code/
 ---
 
 ## 🗒️ Versões
+
+### Launcher v2.63.0
+Pool WPOOL (`warp-pool.ps1` 1.2), as 8 correções do plano de revisão:
+
+- **Várias janelas, vários IPs de verdade:** janela CLI do pool usa `--standalone` (servidor próprio) e não reinicia mais o serviço compartilhado; o Desktop fica com ele.
+- **Desktop único:** uma segunda janela em modo Desktop vira CLI, com aviso, em vez de reaproveitar o app da outra janela (e o IP dela).
+- **5ª janela nunca sai direto:** pede mais um túnel (`grow`, até `WPOOL_MAX`), espera ~1 min e, se não houver, usa o WARP.
+- **Vigia destacado:** fechar a janela que subiu o pool não mata mais o vigia (`spawn -Then boot`).
+- **Fila não perde pedidos:** worker sem túnel tenta de novo e o pedido fica na fila.
+- **Checagem no `opencode.ai`** em vez de `www.cloudflare.com`.
+- **Medição do limite por faixa:** `rotation-history.jsonl`, `-Action stats` e a opção `WPOOL_DEDUPE_PREFIX=64`.
+- **Detecção do app WARP corrigida:** só o modo túnel conta como conflito; o modo proxy é sempre compatível.
+- **Tradução** das opções do pool para português, limpeza de túneis extras e progresso na primeira subida.
 
 ### Launcher v2.62.1
 Correções do pool WPOOL (`warp-pool.ps1` 1.1), medidas nesta máquina antes e depois:
