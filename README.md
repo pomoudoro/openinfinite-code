@@ -46,6 +46,42 @@ O launcher também tem **Tor**, **proxies HTTP grátis** e **VPN Gate**. Use só
 
 ---
 
+## 🆚 Este projeto ou o OpenCode Infinite original?
+
+Este projeto nasceu do [OpenCode Infinite](https://gitlab.com/jekooo/opencode-infinite) e traz as correções do launcher dele até a versão mais recente (**2.60.28**). A diferença é o caminho: o original apostou num **app Desktop próprio** (um OpenCode modificado), e este aposta no **launcher com o OpenCode oficial** e em **várias conversas em paralelo**.
+
+*Comparado com o original v2.60.31 / Desktop 2.2.32, em 27/11/2026.*
+
+| Recurso | Este | Original | Vence |
+|---|:-:|:-:|---|
+| Troca o IP sozinho no limite e continua no mesmo chat | ✅ | ✅ | empate |
+| Testa o IP novo num chat temporário antes de retomar | ✅ | ✅ | empate |
+| WARP, Tor, proxies grátis, SOCKS5, VPN Gate | ✅ | ✅ | empate |
+| **Várias conversas ao mesmo tempo, cada uma com IP próprio** (pool de túneis) | ✅ | ❌ | **este** |
+| **Aprende faixas de IP "queimadas"** e foge delas | ✅ | ❌ (só lembra IPs já usados) | **este** |
+| **Troca instantânea** para um túnel reserva já testado | ✅ | ❌ | **este** |
+| Painel com gráfico de quanto cada IP durou | ✅ | ❌ | **este** |
+| Fila de pedidos rodando em paralelo (`FILA.bat`) | ✅ | ❌ | **este** |
+| Instalador que confere e instala Python, WARP, Node e Desktop | ✅ | ❌ | **este** |
+| Em português, com DeepSeek V4.1 max e mensagem de retomada já configurados | ✅ | parcial (tem tradução) | **este** |
+| Orquestrador de agentes e bridge para o Claude Code | ✅ | ❌ | **este** |
+| Usa o **OpenCode Desktop oficial** (atualiza pela própria OpenCode) | ✅ | ❌ (app modificado, instalador sem assinatura) | **este** |
+| Só scripts que dá para ler; nada se atualiza sozinho por baixo dos panos | ✅ | ❌ (tem atualizador próprio) | **este** |
+| Testes automáticos a cada push | ✅ | ❌ | **este** |
+| App com botões (Auto, Reset limit, Status, Stop) em vez de menu de terminal | ❌ | ✅ | **original** |
+| Funciona **sem o app Cloudflare WARP** instalado (WARP embutido) | ❌ | ✅ | **original** |
+| Linux e macOS | ❌ (só Windows) | ✅ | **original** |
+| Retomada invisível (sem mensagem no chat) | ❌ (manda "voltamos, pode continuar…") | ✅ | **original** |
+| Mullvad, Windscribe e Route64 | ❌ | ✅ (no app) | **original** |
+| Provedores DeepAI e OmniRoute prontos | ❌ | ✅ | **original** |
+| Releases com `SHA256SUMS` para conferir o download | ❌ (clone ou ZIP do GitHub) | ✅ | **original** |
+
+**Use este se:** você está no Windows, quer **mais de uma conversa ao mesmo tempo**, quer que a troca de IP **não caia de novo numa faixa ruim**, e prefere o OpenCode oficial com scripts que dá para ler.
+
+**Use o original se:** você está no Linux ou no Mac, quer um app com botões, ou não quer instalar o app do Cloudflare WARP.
+
+---
+
 ## 📦 O que precisa ter
 
 Só Windows 10 ou 11. O `INSTALAR.bat` confere tudo e oferece instalar o que faltar (pelo **winget**).
