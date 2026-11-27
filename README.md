@@ -39,6 +39,7 @@ ou, sem Git: no GitHub, **Code → Download ZIP** e extraia a pasta (por exemplo
 > | Menu | **[1] Nova IP e iniciar o OpenCode** |
 >
 > É o caminho que aproveita tudo: túneis prontos com IPs de faixas boas, troca instantânea quando o limite chega e várias janelas com IP próprio. Ligue o pool uma vez em **Definições** ([próxima seção](#-várias-janelas-cada-uma-com-o-próprio-ip-pool-de-túneis)).
+> **Atalho:** `INICIAR-POOL.bat` faz o mesmo que 2-5-1 sem nenhum menu (abre na última pasta usada; arraste uma pasta em cima dele para abrir nela).
 > Sem o pool, use **2 - 1 - 1** (*[1] WARP*): um IP para o PC inteiro.
 > Use **2-…** e não 1-1-1. O `[1] opencode automático` da tela inicial pula tudo e abre uma sessão nova; o `[2]` passa pela escolha da conexão e pega um IP novo antes de abrir o OpenCode Desktop, que é o caminho testado com a retomada automática.
 > O modo Desktop já vem salvo pelo instalador, por isso não aparece tela de modo nem de pasta (o próprio Desktop escolhe o projeto). Se o Desktop não estiver instalado, aparece a tela de modo antes da conexão.
@@ -60,7 +61,7 @@ Com o WARP normal, o PC inteiro tem **um** IP: quando uma conversa bate o limite
 
 Feche e abra o `INICIAR.bat` de novo. Na primeira vez ele leva até ~2 minutos criando os túneis (mostra o progresso).
 
-**Usar:** `INICIAR.bat` → **2 - 5 - 1** (*Iniciar o OpenCode* → *WIREGUARD* → *Nova IP e iniciar o OpenCode*). Para outra conversa em paralelo, abra o `INICIAR.bat` de novo e repita. A primeira janela abre o app Desktop; as seguintes abrem o OpenCode no terminal (o Desktop só abre uma vez por máquina), cada uma no seu túnel.
+**Usar:** `INICIAR-POOL.bat` (direto, sem menus) ou `INICIAR.bat` → **2 - 5 - 1** (*Iniciar o OpenCode* → *WIREGUARD* → *Nova IP e iniciar o OpenCode*). Para outra conversa em paralelo, abra o `INICIAR.bat` de novo e repita. A primeira janela abre o app Desktop; as seguintes abrem o OpenCode no terminal (o Desktop só abre uma vez por máquina), cada uma no seu túnel.
 
 | Situação | O que acontece |
 |---|---|
@@ -71,7 +72,7 @@ Feche e abra o `INICIAR.bat` de novo. Na primeira vez ele leva até ~2 minutos c
 | Ao abrir uma janela | Ela pega o túnel livre da faixa com melhor histórico (a que mais durou nas últimas 24 h). |
 | Você fecha uma janela | O túnel dela fica livre para a próxima. |
 
-**Atalhos:** `POOL.bat` (menu: ver o estado dos túneis, ligar, desligar, trocar o IP de um túnel) e `FILA.bat` (manda pedidos para rodarem sozinhos em paralelo, cada um no seu túnel: `FILA.bat "resuma o arquivo X"` e depois `FILA.bat dispatcher` dentro da pasta do projeto). Os dois ficam em `%LOCALAPPDATA%\opencode-infinite\`.
+**Atalhos:** `POOL.bat` (menu: ver o estado dos túneis, ligar, desligar, trocar o IP de um túnel, **8** stats das famílias de IP e **9** painel no navegador) e `FILA.bat` (manda pedidos para rodarem sozinhos em paralelo, cada um no seu túnel: `FILA.bat "resuma o arquivo X"` e depois `FILA.bat dispatcher` dentro da pasta do projeto). Os dois ficam em `%LOCALAPPDATA%\opencode-infinite\`.
 
 > [!NOTE]
 > Os túneis do pool também são do Cloudflare WARP (identidades WireGuard próprias, criadas com o `wgcf`). A diferença é ter vários IPs ao mesmo tempo, separados do app WARP. > O limite grátis é do OpenCode: se um dia ele passar a valer por conta, e não por IP, o pool não ajuda.
@@ -174,7 +175,7 @@ powershell ... -File warp-pool.ps1 -Action rotate -Slot 1
 powershell ... -File warp-pool.ps1 -Action down
 ```
 
-Listar todas as ações: `up|status|claim|release|rotate|verify|down|daemon|reap|grow|boot|spawn|stats`. `grow` abre mais um túnel (até `-Max`/`WPOOL_MAX`); `spawn -Then boot|daemon` inicia o boot ou o vigia destacado; `stats` mostra o histórico de rotações por faixa `/64`. `-State` aponta a raiz do estado (padrão: `%LOCALAPPDATA%\opencode-infinite`), `-Slot` escolhe o slot no `rotate` e no `down` parcial, `-Instance` identifica a janela no `claim`/`release`. `-Force` no `rotate` gera identidade nova em vez de só reconectar. `-OwnerPid` no `claim` diz qual processo é o dono (padrão: quem chamou o script). `-AllowWarpTunnel` força o `up` com o app WARP conectado mesmo com `WPOOL_ALLOW_WARP_TUNNEL=0`.
+Listar todas as ações: `up|status|claim|release|rotate|verify|down|daemon|reap|grow|boot|spawn|stats|dashboard`. `dashboard` grava `pool\dashboard.html` e abre no navegador (`-NoOpen` só grava); o vigia regrava a página a cada ciclo. `grow` abre mais um túnel (até `-Max`/`WPOOL_MAX`); `spawn -Then boot|daemon` inicia o boot ou o vigia destacado; `stats` mostra o histórico de rotações por faixa `/64`. `-State` aponta a raiz do estado (padrão: `%LOCALAPPDATA%\opencode-infinite`), `-Slot` escolhe o slot no `rotate` e no `down` parcial, `-Instance` identifica a janela no `claim`/`release`. `-Force` no `rotate` gera identidade nova em vez de só reconectar. `-OwnerPid` no `claim` diz qual processo é o dono (padrão: quem chamou o script). `-AllowWarpTunnel` força o `up` com o app WARP conectado mesmo com `WPOOL_ALLOW_WARP_TUNNEL=0`.
 
 Códigos de saída: `0` ok, `2` sem IP novo/distinto, `3` slot ou processo morto, `4` trava ocupada, `6` app WARP em modo túnel e não permitido, `7` nenhum slot livre, `8` pool já no máximo (`WPOOL_MAX`).
 
@@ -229,9 +230,10 @@ Se algo falhar, olhe `recovery-events.jsonl`, `pool\pool-status.json` e `instanc
 
 | Quero... | Faço |
 |---|---|
-| Abrir normalmente (pool ligado) | `INICIAR.bat` → **2 - 5 - 1**; para outra conversa em paralelo, repita |
+| Abrir normalmente (pool ligado) | `INICIAR-POOL.bat`, ou `INICIAR.bat` → **2 - 5 - 1**; para outra conversa em paralelo, repita |
 | Abrir sem o pool (WARP simples) | `INICIAR.bat` → **2 - 1 - 1** |
-| Ver famílias de IP boas e queimadas | `POOL.bat` → stats (ou `warp-pool.ps1 -Action stats`) |
+| Ver famílias de IP boas e queimadas | `POOL.bat` → **8** (stats) |
+| Acompanhar o pool numa página | `POOL.bat` → **9** (painel): túneis, famílias, últimas trocas e eventos; recarrega sozinha a cada 30 s |
 | Ver os túneis e os IPs | `POOL.bat` → **1** |
 | Rodar pedidos sozinhos em paralelo | `FILA.bat "pedido"` e `FILA.bat dispatcher` |
 | Abrir num projeto específico | arraste a pasta do projeto em cima do `INICIAR.bat` |
@@ -301,6 +303,7 @@ Depois é só abrir o `INICIAR.bat`: ele percebe que os arquivos da pasta mudara
 openinfinite-code/
 ├── INSTALAR.bat            instala / atualiza tudo
 ├── INICIAR.bat             abre o launcher (caminho 2-5-1 com o pool, 2-1-1 sem)
+├── INICIAR-POOL.bat        abre direto no pool (2-5-1 sem menus)
 ├── POOL.bat                menu do pool de túneis
 ├── FILA.bat                fila de pedidos em paralelo
 ├── launcher/
@@ -321,6 +324,11 @@ openinfinite-code/
 ---
 
 ## 🗒️ Versões
+
+### warp-pool.ps1 1.6
+- **Painel:** `-Action dashboard` (ou `POOL.bat` → 9) gera `pool\dashboard.html` com túneis (IP, família, nota, estado, janela), famílias por nota, últimas trocas (quanto cada IP durou, troca instantânea ou não) e eventos. O vigia regrava a página a cada ciclo e ela recarrega a cada 30 s. Tema claro e escuro.
+- **Atalho direto:** `INICIAR-POOL.bat` e a opção `--pool` do launcher abrem no caminho 2-5-1 sem menus. Com o pool desligado, avisa e não abre.
+- `POOL.bat` ganhou **8 - stats** e **9 - painel** (também `POOL.bat stats` e `POOL.bat painel`).
 
 ### warp-pool.ps1 1.5
 - **Troca instantânea:** no limite, a janela Desktop pula na hora para um túnel livre já verificado numa família boa; o túnel antigo gira em segundo plano. `WPOOL_FAST_SWAP=0` desliga.

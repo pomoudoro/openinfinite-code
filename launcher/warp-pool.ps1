@@ -8,7 +8,7 @@
 # Never prints PrivateKey or PresharedKey.
 [CmdletBinding()]
 param(
-  [ValidateSet('up','status','claim','release','rotate','verify','down','daemon','reap','grow','boot','spawn','stats')]
+  [ValidateSet('up','status','claim','release','rotate','verify','down','daemon','reap','grow','boot','spawn','stats','dashboard')]
   [string]$Action = 'status',
   # spawn: the action the detached process runs (boot or daemon).
   [ValidateSet('boot','daemon')]
@@ -27,6 +27,8 @@ param(
   [switch]$Force,
   # rotate: try the fast swap to a free verified slot first (v1.5; needs -Instance and Reason quota/watcher).
   [switch]$Swap,
+  # dashboard: write pool\dashboard.html without opening it.
+  [switch]$NoOpen,
   [switch]$AllowWarpTunnel,
   [string]$State = ($env:LOCALAPPDATA + '\opencode-infinite'),
   [int]$PortBase = 0,
@@ -52,7 +54,7 @@ $PeerEndpoint = '162.159.192.1:2408'
 # answered on all of these; 162.159.193.1:2408 did not. A rebuilt slot moves to the next one, so
 # an endpoint that stopped answering the slot's handshakes is not retried in a loop.
 $PeerEndpoints = @('162.159.192.1:2408', '188.114.97.1:2408', '162.159.195.1:2408', '162.159.192.1:4500', '188.114.96.1:500')
-$ScriptVersion = '1.5'
+$ScriptVersion = '1.6'
 
 $SelfPath = $MyInvocation.MyCommand.Path
 $State = [IO.Path]::GetFullPath($State)
@@ -1796,6 +1798,7 @@ function Invoke-Daemon {
       Update-Uniqueness $slots
       $slots = @(Get-AllSlots)
       Write-PoolStatus $slots
+      try { Write-Dashboard | Out-Null } catch { Write-Event 'dashboard-error' @{ error = $_.Exception.Message } }
       $end = (Get-Date).AddSeconds($interval)
       while ((Get-Date) -lt $end -and -not (Test-Path -LiteralPath $stopFlag)) { Start-Sleep -Seconds 1 }
     }
@@ -1977,6 +1980,171 @@ function Invoke-Stats {
   return 0
 }
 
+# ---- dashboard (v1.6) ---------------------------------------------------------------------------
+# pool\dashboard.html: one self-contained page with the tunnels, the IP families and the latest
+# rotations, swaps and events. 'dashboard' writes it and opens it; the daemon rewrites it every
+# cycle, and the page reloads itself every 30 s, so an open tab stays current.
+function HtmlEnc([string]$s) { return [Net.WebUtility]::HtmlEncode([string]$s) }
+function Fmt-Ago($when) {
+  if (-not $when) { return '-' }
+  try { $d = (Get-Date) - [DateTime]::Parse([string]$when) } catch { return '-' }
+  if ($d.TotalSeconds -lt 90) { return ([int]$d.TotalSeconds).ToString() + ' s' }
+  if ($d.TotalMinutes -lt 90) { return ([int]$d.TotalMinutes).ToString() + ' min' }
+  if ($d.TotalHours -lt 48) { return ([int]$d.TotalHours).ToString() + ' h' }
+  return ([int]$d.TotalDays).ToString() + ' d'
+}
+function Fmt-Sec([int]$s) {
+  if ($s -lt 0) { return '-' }
+  if ($s -lt 120) { return $s.ToString() + ' s' }
+  return ([Math]::Round($s / 60.0, 1)).ToString([Globalization.CultureInfo]::InvariantCulture) + ' min'
+}
+function Read-JsonLines([string]$path, [int]$last) {
+  if (-not (Test-Path -LiteralPath $path)) { return @() }
+  $lines = @()
+  try { $lines = @(Get-Content -LiteralPath $path -Tail $last -Encoding UTF8) } catch { return @() }
+  return @($lines | Where-Object { $_ -and $_.Trim() } | ForEach-Object { try { $_ | ConvertFrom-Json } catch { } } | Where-Object { $_ })
+}
+function Kpi([string]$label, [string]$value, [string]$tag) {
+  return '<div class="kpi ' + $tag + '"><div class="v">' + (HtmlEnc $value) + '</div><div class="l">' + (HtmlEnc $label) + '</div></div>'
+}
+function Write-Dashboard {
+  $fams = Read-Families
+  $slots = @(Get-AllSlots | Sort-Object slot)
+  $now = Get-Date
+  # Tunnels
+  $rowsS = New-Object Text.StringBuilder
+  $famsUp = @{}
+  foreach ($s in $slots) {
+    $ip = [string]$s.ip
+    $fam = Get-Family $ip
+    $bad = ($ip -and (Test-FamilyBad $ip))
+    $selfB = ($ip -and @(Get-BurnedIps $s) -contains $ip)
+    $score = ''
+    if ($ip) { $score = [string](Get-FamilyScore $ip $fams) }
+    $owner = '-'
+    if ($s.owner -and $s.owner.instance) {
+      $owner = [string]$s.owner.instance
+      if ((Test-OwnerAlive $s.owner) -eq $false) { $owner += ' (fechada)' }
+    }
+    if ($s.health -eq 'up' -and $fam) { $famsUp[$fam] = 1 }
+    $tag = 'ok'; $state = 'boa'
+    if ($s.health -ne 'up') { $tag = 'down'; $state = [string]$s.health }
+    elseif ($bad) { $tag = 'bad'; $state = 'queimada' }
+    elseif ($selfB) { $tag = 'warn'; $state = 'IP recem-queimado' }
+    $since = '-'
+    if ($s.PSObject.Properties['ipSince'] -and $s.ipSince) { $since = Fmt-Ago $s.ipSince }
+    [void]$rowsS.Append('<tr><td class="n">' + $s.slot + '</td><td class="n">' + $s.port + '</td><td class="mono">' + (HtmlEnc $ip) + '</td><td class="mono">' + (HtmlEnc $fam) + '</td><td class="n">' + $score + '</td><td><span class="pill ' + $tag + '">' + (HtmlEnc $state) + '</span></td><td>' + (HtmlEnc $owner) + '</td><td>' + (HtmlEnc ([string]$s.colo)) + '</td><td class="n">' + $since + '</td><td class="n">' + (Fmt-Ago $s.verifiedAt) + '</td></tr>')
+  }
+  # Families, best first
+  $famRows = @()
+  foreach ($k in @($fams.Keys)) {
+    $c = Get-FamilyCounts $k $fams
+    $o = @(Get-FamilyOutcomes $k $fams)
+    $score = 0
+    foreach ($x in $o) { if ($x.k -eq 'good') { $score++ } else { $score-- } }
+    if ($o.Count) { if ($o[-1].k -eq 'good') { $score++ } else { $score-- } }
+    $lastT = ''
+    if ($o.Count) { $lastT = $o[-1].t.ToString('o') }
+    $famRows += [pscustomobject]@{ f = $k; q = $c.quick; g = $c.good; b = [bool]$c.burned; score = $score; last = $lastT; inUse = $famsUp.ContainsKey($k) }
+  }
+  $rowsF = New-Object Text.StringBuilder
+  foreach ($r in @($famRows | Sort-Object @{ Expression = 'score'; Descending = $true }, f)) {
+    $tag = 'warn'; $lbl = 'incerta'
+    if ($r.b) { $tag = 'bad'; $lbl = 'queimada' } elseif ($r.score -gt 0) { $tag = 'ok'; $lbl = 'boa' }
+    $use = ''
+    if ($r.inUse) { $use = 'sim' }
+    [void]$rowsF.Append('<tr><td class="mono">' + (HtmlEnc $r.f) + '</td><td class="n">' + $r.score + '</td><td class="n">' + $r.g + '</td><td class="n">' + $r.q + '</td><td><span class="pill ' + $tag + '">' + $lbl + '</span></td><td>' + $use + '</td><td class="n">' + (Fmt-Ago $r.last) + '</td></tr>')
+  }
+  # Rotations, newest first
+  $hist = @(Read-JsonLines (Join-Path $poolDir 'rotation-history.jsonl') 40)
+  [array]::Reverse($hist)
+  $rowsR = New-Object Text.StringBuilder
+  $lived24 = @(); $swaps24 = 0; $quick24 = 0
+  foreach ($h in $hist) {
+    $age = 999999
+    try { $age = ($now - [DateTime]::Parse([string]$h.at)).TotalHours } catch { }
+    $lv = -1
+    try { $lv = [int]$h.livedSec } catch { }
+    $isSwap = [bool]($h.PSObject.Properties['swap'] -and $h.swap)
+    if ($age -lt 24) {
+      if ($lv -ge 0) { $lived24 += $lv; if ($lv -lt $FamQuickSec) { $quick24++ } }
+      if ($isSwap) { $swaps24++ }
+    }
+    $how = 'troca no proprio tunel'
+    if ($isSwap) { $how = 'troca instantanea para o slot ' + $h.swap }
+    $tag = 'warn'
+    if ($lv -ge 0 -and $lv -lt $FamQuickSec) { $tag = 'bad' } elseif ($lv -ge $FamGoodSec) { $tag = 'ok' }
+    [void]$rowsR.Append('<tr><td class="n">' + (Fmt-Ago $h.at) + '</td><td class="n">' + $h.slot + '</td><td class="mono">' + (HtmlEnc (Get-Family ([string]$h.before))) + '</td><td class="mono">' + (HtmlEnc (Get-Family ([string]$h.after))) + '</td><td class="n"><span class="pill ' + $tag + '">' + (Fmt-Sec $lv) + '</span></td><td>' + (HtmlEnc ([string]$h.reason)) + '</td><td>' + $how + '</td></tr>')
+  }
+  # Events worth seeing
+  $want = @('swap', 'burned-replace', 'burned-replace-failed', 'family-collision', 'family-dedupe-failed', 'family-burned', 'exit-refused', 'rotate', 'rotate-failed', 'daemon-restart', 'daemon-restart-failed', 'claim', 'release', 'reap', 'families-seeded', 'daemon-start')
+  $ev = @(Read-JsonLines $eventsFile 400 | Where-Object { $want -contains [string]$_.type } | Select-Object -Last 30)
+  [array]::Reverse($ev)
+  $rowsE = New-Object Text.StringBuilder
+  foreach ($e in $ev) {
+    $d = ''
+    if ($e.data) { $d = (@($e.data.PSObject.Properties | ForEach-Object { $_.Name + '=' + [string]$_.Value }) -join '  ') }
+    [void]$rowsE.Append('<tr><td class="n">' + (Fmt-Ago $e.timestamp) + '</td><td>' + (HtmlEnc ([string]$e.type)) + '</td><td class="mono small">' + (HtmlEnc $d) + '</td></tr>')
+  }
+  # Summary
+  $up = @($slots | Where-Object { $_.health -eq 'up' -and $_.ip })
+  $burnedUp = @($up | Where-Object { Test-FamilyBad ([string]$_.ip) }).Count
+  $med = '-'
+  if ($lived24.Count) { $sorted = @($lived24 | Sort-Object); $med = Fmt-Sec ([int]$sorted[[int][Math]::Floor($sorted.Count / 2)]) }
+  $daemonOn = $false
+  try {
+    $fs = [IO.File]::Open($daemonLock, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    $fs.Dispose()
+  } catch { $daemonOn = $true }
+  if (-not (Test-Path -LiteralPath $daemonLock)) { $daemonOn = $false }
+  $tUp = 'warn'; if ($up.Count -eq $slots.Count -and $slots.Count -gt 0) { $tUp = 'ok' }
+  $tFam = 'warn'; if ($famsUp.Count -ge $up.Count) { $tFam = 'ok' }
+  $tBurn = 'bad'; if ($burnedUp -eq 0) { $tBurn = 'ok' }
+  $tQuick = 'warn'; if ($quick24 -eq 0) { $tQuick = 'ok' }
+  $vD = 'parado'; $tD = 'bad'; if ($daemonOn) { $vD = 'rodando'; $tD = 'ok' }
+  $k = (Kpi 'tuneis no ar' ($up.Count.ToString() + ' / ' + $slots.Count) $tUp) +
+       (Kpi 'familias diferentes em uso' ($famsUp.Count.ToString()) $tFam) +
+       (Kpi 'tuneis em familia queimada' ($burnedUp.ToString()) $tBurn) +
+       (Kpi 'trocas instantaneas (24 h)' ($swaps24.ToString()) '') +
+       (Kpi 'quedas rapidas (24 h)' ($quick24.ToString()) $tQuick) +
+       (Kpi 'duracao mediana de um IP (24 h)' $med '') +
+       (Kpi 'vigia' $vD $tD)
+  $css = @'
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--mut:#667085;--line:#e4e7ec;--ok:#0f7b4f;--okb:#e3f5ec;--bad:#b42318;--badb:#fde8e6;--warn:#9a6700;--warnb:#fdf3d7;--down:#475467;--downb:#eef0f3}
+@media (prefers-color-scheme: dark){:root{--bg:#0f1218;--card:#171b23;--fg:#e6e9ef;--mut:#98a2b3;--line:#262c38;--ok:#4ade9b;--okb:#12301f;--bad:#ff8a80;--badb:#3a1614;--warn:#f5c451;--warnb:#33290e;--down:#a3acbb;--downb:#232833}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:1200px;margin:0 auto;padding:20px 16px 40px}h1{font-size:20px;margin:0 0 2px}h2{font-size:15px;margin:26px 0 8px}
+.sub{color:var(--mut);font-size:12.5px}.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-top:16px}
+.kpi{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 12px}.kpi .v{font-size:22px;font-weight:650}.kpi .l{color:var(--mut);font-size:12px}
+.kpi.ok .v{color:var(--ok)}.kpi.bad .v{color:var(--bad)}.kpi.warn .v{color:var(--warn)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow-x:auto}
+table{border-collapse:collapse;width:100%}th,td{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;white-space:nowrap}
+th{font-size:12px;color:var(--mut);font-weight:600}tr:last-child td{border-bottom:0}td.n{text-align:right;font-variant-numeric:tabular-nums}
+.mono{font-family:ui-monospace,Consolas,monospace;font-size:12.5px}.small{font-size:11.5px;white-space:normal;color:var(--mut)}
+.pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;font-weight:600}
+.pill.ok{color:var(--ok);background:var(--okb)}.pill.bad{color:var(--bad);background:var(--badb)}.pill.warn{color:var(--warn);background:var(--warnb)}.pill.down{color:var(--down);background:var(--downb)}
+'@
+  $sb = New-Object Text.StringBuilder
+  [void]$sb.Append('<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="refresh" content="30"><title>Pool de tuneis</title><style>' + $css + '</style></head><body><main>')
+  [void]$sb.Append('<h1>Pool de t&uacute;neis</h1><div class="sub">Atualizado ' + (HtmlEnc ($now.ToString('dd/MM/yyyy HH:mm:ss'))) + ' &middot; recarrega a cada 30 s (o vigia regrava a p&aacute;gina a cada ciclo) &middot; warp-pool ' + $ScriptVersion + ' &middot; fam&iacute;lia = h1:h2:*:h4::sufixo</div>')
+  [void]$sb.Append('<div class="kpis">' + $k + '</div>')
+  [void]$sb.Append('<h2>T&uacute;neis</h2><div class="card"><table><tr><th>Slot</th><th>Porta</th><th>IP de sa&iacute;da</th><th>Fam&iacute;lia</th><th>Nota</th><th>Estado</th><th>Janela</th><th>Colo</th><th>IP h&aacute;</th><th>Checado h&aacute;</th></tr>' + $rowsS.ToString() + '</table></div>')
+  [void]$sb.Append('<h2>Fam&iacute;lias de IP (&uacute;ltimas ' + $BurnedTtlHours + ' h, melhor primeiro)</h2><div class="card"><table><tr><th>Fam&iacute;lia</th><th>Nota</th><th>Duraram 5 min+</th><th>Ca&iacute;ram em menos de 2 min</th><th>Estado</th><th>Em uso</th><th>&Uacute;ltimo resultado</th></tr>' + $rowsF.ToString() + '</table></div>')
+  [void]$sb.Append('<h2>&Uacute;ltimas trocas</h2><div class="card"><table><tr><th>H&aacute;</th><th>Slot</th><th>Fam&iacute;lia antes</th><th>Fam&iacute;lia depois</th><th>O IP antigo durou</th><th>Motivo</th><th>Como</th></tr>' + $rowsR.ToString() + '</table></div>')
+  [void]$sb.Append('<h2>Eventos</h2><div class="card"><table><tr><th>H&aacute;</th><th>Evento</th><th>Detalhes</th></tr>' + $rowsE.ToString() + '</table></div>')
+  [void]$sb.Append('</main></body></html>')
+  $path = Join-Path $poolDir 'dashboard.html'
+  [IO.File]::WriteAllText($path, $sb.ToString(), (New-Object Text.UTF8Encoding($false)))
+  return $path
+}
+function Invoke-Dashboard {
+  Ensure-Dirs
+  $p = Write-Dashboard
+  Write-Host ('dashboard: ' + $p)
+  if (-not $NoOpen) { try { Start-Process $p } catch { } }
+  return 0
+}
+
 try {
   Ensure-Dirs
   $code = 0
@@ -1985,6 +2153,7 @@ try {
     'boot' { $code = Invoke-Boot }
     'spawn' { $code = Invoke-Spawn }
     'stats' { $code = Invoke-Stats }
+    'dashboard' { $code = Invoke-Dashboard }
     'up' { $code = Invoke-Up }
     'status' { $code = Invoke-Status }
     'claim' { $code = Invoke-Claim }
