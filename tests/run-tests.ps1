@@ -156,7 +156,7 @@ $Swap = [switch]$false
 # ---- 7. claim picks the best family ------------------------------------------------------------
 Write-Host 'claim'
 foreach ($n in 1..4) { $s = Get-Slot $n; $s.owner = $null; $s.burned = @(); Save-Slot $s }
-Remove-Item -LiteralPath (Join-Path $claimsDir '*.json') -Force
+Get-ChildItem -LiteralPath $claimsDir -Filter '*.json' -File | Remove-Item -Force
 Set-TestSlot 1 '2a09:bac1:1140:36a8::39c:9'
 Set-TestSlot 2 '2a09:bac5:f44:1c96::2d9:5'
 Set-TestSlot 3 '2a09:bac5:f41:297d::422:7'
