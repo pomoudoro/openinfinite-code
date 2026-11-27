@@ -149,6 +149,9 @@ O pool cria **N túneis WARP** com **um proxy local por slot**: cada instância 
 - **Vigia destacado (v2.63):** o boot (`up` + `daemon`) nasce com `-Action spawn`, fora do console da janela. Fechar a janela que subiu o pool não derruba mais o vigia.
 - **Limite por IP ou por faixa? (v2.63):** cada rotação grava `pool\rotation-history.jsonl` com o `/64` do IP antigo e do novo e quanto tempo o antigo durou. `-Action stats` resume isso; se o limite voltar rápido na mesma faixa, ele sugere `WPOOL_DEDUPE_PREFIX=64` (dois túneis com o mesmo `/64` passam a contar como o mesmo IP).
 - **Famílias queimadas (v2.63.1):** medido em 26/11: IPs `2a09:bac5:…` duraram 8 a 22 min de uso, enquanto **todo** IP `2a09:bac1:…:36a8` (a faixa que o app WARP também entrega, compartilhada por muita gente) bateu o limite de novo em 10 s, e a janela ficava num loop de trocas a cada 10 s. Agora o launcher informa o motivo da troca (`-Reason quota|watcher`) e o pool guarda, por família (os primeiros 32 bits do IPv6), quantos IPs bateram o limite em menos de 2 min e quantos duraram 5 min ou mais (`poolamilies.json`). Família com 2+ quedas rápidas e nenhum sucesso nas últimas 2 h é **queimada**: a troca recusa esses IPs (até 4 reconexões trocando de endpoint, depois identidade nova), o `claim` entrega primeiro túneis de família boa e o `status` marca `(burned)`. Recusas aparecem como `exit-refused` em `recovery-events.jsonl`; `-Action stats` mostra a tabela de famílias.
+- **Família = faixa estreita (warp-pool 1.4):** os primeiros 32 bits misturavam faixas boas e ruins. Medido em 26/11 (25 trocas): dentro de `2a09:bac5` o grupo `…:243c::39c:N` caía em 8 a 89 s, enquanto `…:297d::422:N`, `…:1c8c::2d8:N` e `…:1c96::2d9:N` duravam de 5 a 35 min. Agora a família é `h1:h2:*:h4::sufixo` (ex.: `2a09:bac5:*:243c::39c`; o 3º hextet só acompanha o endpoint). A memória fica em `poolamilies-v2.json`, semeada na primeira execução a partir de `rotation-history.jsonl`. **Queimada** = 2+ quedas rápidas nas últimas `WPOOL_BURNED_TTL_HOURS` (24 h) e as duas últimas foram rápidas; uma família que funcionou de manhã e passou a queimar é recusada logo, e um IP que dura a libera de novo.
+- **Túnel livre em família queimada é trocado (1.4):** no `up` e a cada ciclo do vigia, um slot sem dono numa família queimada gira para uma família boa (evento `burned-replace`). Em 27/11, depois de religar o PC, os 4 túneis voltaram em famílias queimadas.
+- **4 túneis = 4 famílias (1.4):** com `WPOOL_FAMILY_DEDUPE=1` (padrão), dois slots livres na mesma família contam como repetidos e o de cima gira (evento `family-collision`). Slot em uso nunca é girado por isso. Trocas automáticas têm pausa de 10 min por slot, para não registrar identidades em loop quando não há família livre.
 - **Limpeza (v2.63):** túneis acima da quantidade configurada são parados e apagados no `up`, a menos que uma janela viva ainda os use. A primeira subida mostra o progresso (`pool\up-progress.json`).
 - **Limitação:** destino IPv4-only sai pelo IPv4 compartilhado (CGNAT); IP próprio por instância exige IPv6 no destino (`opencode.ai` tem AAAA).
 
@@ -310,7 +313,10 @@ openinfinite-code/
 
 ## 🗒️ Versões
 
-### Launcher v2.63.1 (atual)
+### warp-pool.ps1 1.4
+- Família de IP estreita (`h1:h2:*:h4::sufixo`), túnel livre em família queimada é trocado no `up` e pelo vigia, e os túneis livres ficam em famílias diferentes. `WPOOL_FAMILY_DEDUPE=0` volta ao comportamento antigo de dedupe.
+
+### Launcher v2.63.1
 - **Loop de 10 s no limite corrigido:** o pool aprende quais famílias de IP do WARP já chegam com o limite estourado (ex.: `2a09:bac1:…:36a8`) e não troca mais para elas; a troca desiste de um IP ruim em 2 medições em vez de esperar 20 s. `warp-pool.ps1` 1.3.
 
 ### Launcher v2.63.0
