@@ -72,7 +72,7 @@ Feche e abra o `INICIAR.bat` de novo. Na primeira vez ele leva até ~2 minutos c
 | Ao abrir uma janela | Ela pega o túnel livre da faixa com melhor histórico (a que mais durou nas últimas 24 h). |
 | Você fecha uma janela | O túnel dela fica livre para a próxima. |
 
-**Atalhos:** `POOL.bat` (menu: ver o estado dos túneis, ligar, desligar, trocar o IP de um túnel, **8** stats das famílias de IP e **9** painel no navegador) e `FILA.bat` (manda pedidos para rodarem sozinhos em paralelo, cada um no seu túnel: `FILA.bat "resuma o arquivo X"` e depois `FILA.bat dispatcher` dentro da pasta do projeto). Os dois ficam em `%LOCALAPPDATA%\opencode-infinite\`.
+**Atalhos:** `POOL.bat` (menu: ver o estado dos túneis, ligar, desligar, trocar o IP de um túnel, **8** stats das famílias de IP, **9** painel no navegador e **L** limpar a pasta de estado) e `FILA.bat` (manda pedidos para rodarem sozinhos em paralelo, cada um no seu túnel: `FILA.bat "resuma o arquivo X"` e depois `FILA.bat dispatcher` dentro da pasta do projeto). Os dois ficam em `%LOCALAPPDATA%\opencode-infinite\`.
 
 > [!NOTE]
 > Os túneis do pool também são do Cloudflare WARP (identidades WireGuard próprias, criadas com o `wgcf`). A diferença é ter vários IPs ao mesmo tempo, separados do app WARP. > O limite grátis é do OpenCode: se um dia ele passar a valer por conta, e não por IP, o pool não ajuda.
@@ -158,6 +158,8 @@ O pool cria **N túneis WARP** com **um proxy local por slot**: cada instância 
 - **4 túneis = 4 famílias (1.4):** com `WPOOL_FAMILY_DEDUPE=1` (padrão), dois slots livres na mesma família contam como repetidos e o de cima gira (evento `family-collision`). Slot em uso nunca é girado por isso. Trocas automáticas têm pausa de 10 min por slot, para não registrar identidades em loop quando não há família livre.
 - **Troca instantânea (1.5):** quando o limite volta (`-Reason quota|watcher`), a janela Desktop passa `-Swap -Instance` no `rotate`. Se houver um slot **livre**, `up`, numa família boa e diferente da que queimou, o claim muda para ele na hora (nova porta; o launcher reinicia o serviço com o proxy novo). O slot antigo fica livre com o IP em `burned[]`, vai para o fim da fila do `claim` e o vigia o gira em segundo plano. Sem reserva boa, cai na troca normal. Eventos: `swap` em `recovery-events.jsonl` e linha com `"swap": N` em `rotation-history.jsonl`. Janela no terminal não usa (o servidor `--standalone` nasceu com a porta antiga). Desligar: `WPOOL_FAST_SWAP=0`.
 - **Melhor família primeiro (1.5):** cada família tem uma nota nas últimas 24 h (+1 por IP que durou, −1 por queda rápida, o resultado mais recente conta em dobro). O `claim` e a troca instantânea escolhem a maior nota; família desconhecida vale 0.
+- **Logs com limite (1.7):** `recovery-events.jsonl` passa de 2 MB → as linhas antigas vão para `recovery-events.jsonl.1` e ficam as 5000 mais novas; `rotation-history.jsonl` faz o mesmo a partir de 1 MB (fica 3000). O vigia confere a cada ciclo.
+- **Slot em uso (1.7):** trocas que o pool faz sozinho (faixa queimada, dedupe por família) também respeitam claims sem processo dono conhecido (`lease`), não só os de processo vivo.
 - **Limpeza (v2.63):** túneis acima da quantidade configurada são parados e apagados no `up`, a menos que uma janela viva ainda os use. A primeira subida mostra o progresso (`pool\up-progress.json`).
 - **Limitação:** destino IPv4-only sai pelo IPv4 compartilhado (CGNAT); IP próprio por instância exige IPv6 no destino (`opencode.ai` tem AAAA).
 
@@ -175,7 +177,7 @@ powershell ... -File warp-pool.ps1 -Action rotate -Slot 1
 powershell ... -File warp-pool.ps1 -Action down
 ```
 
-Listar todas as ações: `up|status|claim|release|rotate|verify|down|daemon|reap|grow|boot|spawn|stats|dashboard`. `dashboard` grava `pool\dashboard.html` e abre no navegador (`-NoOpen` só grava); o vigia regrava a página a cada ciclo. `grow` abre mais um túnel (até `-Max`/`WPOOL_MAX`); `spawn -Then boot|daemon` inicia o boot ou o vigia destacado; `stats` mostra o histórico de rotações por faixa `/64`. `-State` aponta a raiz do estado (padrão: `%LOCALAPPDATA%\opencode-infinite`), `-Slot` escolhe o slot no `rotate` e no `down` parcial, `-Instance` identifica a janela no `claim`/`release`. `-Force` no `rotate` gera identidade nova em vez de só reconectar. `-OwnerPid` no `claim` diz qual processo é o dono (padrão: quem chamou o script). `-AllowWarpTunnel` força o `up` com o app WARP conectado mesmo com `WPOOL_ALLOW_WARP_TUNNEL=0`.
+Listar todas as ações: `up|status|claim|release|rotate|verify|down|daemon|reap|grow|boot|spawn|stats|dashboard`. `dashboard` grava `pool\dashboard.html` e abre no navegador (`-NoOpen` só grava); o vigia regrava a página a cada ciclo. `tidy` arquiva cópias antigas da raiz do estado (`config.env.before-*`, `OpenCode Infinite backup *.bat`, `watcher.ps1.before-*`...) em `backup\estado-antigo\` e lista o que ocupa espaço em `backup\`; `tidy -Prune` **apaga** as cópias antigas do banco de chats (`opencode.db`, fica a mais nova) e `.bak` com mais de 14 dias (ficam os 2 mais novos de cada arquivo). `grow` abre mais um túnel (até `-Max`/`WPOOL_MAX`); `spawn -Then boot|daemon` inicia o boot ou o vigia destacado; `stats` mostra o histórico de rotações por faixa `/64`. `-State` aponta a raiz do estado (padrão: `%LOCALAPPDATA%\opencode-infinite`), `-Slot` escolhe o slot no `rotate` e no `down` parcial, `-Instance` identifica a janela no `claim`/`release`. `-Force` no `rotate` gera identidade nova em vez de só reconectar. `-OwnerPid` no `claim` diz qual processo é o dono (padrão: quem chamou o script). `-AllowWarpTunnel` força o `up` com o app WARP conectado mesmo com `WPOOL_ALLOW_WARP_TUNNEL=0`.
 
 Códigos de saída: `0` ok, `2` sem IP novo/distinto, `3` slot ou processo morto, `4` trava ocupada, `6` app WARP em modo túnel e não permitido, `7` nenhum slot livre, `8` pool já no máximo (`WPOOL_MAX`).
 
@@ -191,6 +193,10 @@ powershell ... -File multi-dispatcher.ps1 -Pool on -Count 4 -Drain
 No dispatcher, `auto` desativa o pool se `up=0` (volta ao caminho antigo), `on` exige slots up e aborta se não houver, e `off` mantém o caminho antigo. Cada worker recebe `HTTP_PROXY`/`HTTPS_PROXY` (e `http_proxy`/`https_proxy`) próprios, `NO_PROXY=127.0.0.1,localhost,::1` e `XDG_DATA_HOME`/`XDG_STATE_HOME`/`XDG_CONFIG_HOME`/`XDG_CACHE_HOME` dentro da pasta do worker — um `XDG_*` herdado venceria o `USERPROFILE` isolado. Antes de cada lançamento o dispatcher faz um trace pelo proxy do worker; slot morto é girado uma vez e, se continuar morto, o item espera a próxima volta em vez de sair direto pelo IP da casa. `worker_start` registra `slot`, `ip` e `proxy`.
 
 ### Testes
+
+**Automáticos (sem túnel, sem rede):** `powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1`. Confere a sintaxe de todo `.ps1` e dos blocos PowerShell dentro do launcher e testa o `warp-pool.ps1` numa pasta de estado descartável, com o histórico real de 26/11 (`tests\fixtures`): família, regra de queimada, nota, dedupe, troca instantânea, `claim`, painel, limite de log e `tidy`. Não precisa de módulo nenhum. O GitHub Actions (`.github/workflows/testes.yml`) roda os mesmos testes a cada push, no Windows PowerShell 5.1 (e no 7, só como aviso).
+
+**Na mão, com túneis de verdade:**
 
 Use `-State` apontando para `%TEMP%\wpool-teste` (nunca o estado real) e portas altas, ex.: `43500`, para não conflitar com o pool de produção.
 
@@ -233,6 +239,7 @@ Se algo falhar, olhe `recovery-events.jsonl`, `pool\pool-status.json` e `instanc
 | Abrir normalmente (pool ligado) | `INICIAR-POOL.bat`, ou `INICIAR.bat` → **2 - 5 - 1**; para outra conversa em paralelo, repita |
 | Abrir sem o pool (WARP simples) | `INICIAR.bat` → **2 - 1 - 1** |
 | Ver famílias de IP boas e queimadas | `POOL.bat` → **8** (stats) |
+| Arrumar a pasta de estado | `POOL.bat` → **L**: arquiva cópias antigas em `backup\estado-antigo` e mostra o que ocupa espaço. Não apaga nada |
 | Acompanhar o pool numa página | `POOL.bat` → **9** (painel): túneis, famílias, últimas trocas e eventos; recarrega sozinha a cada 30 s |
 | Ver os túneis e os IPs | `POOL.bat` → **1** |
 | Rodar pedidos sozinhos em paralelo | `FILA.bat "pedido"` e `FILA.bat dispatcher` |
@@ -304,6 +311,8 @@ openinfinite-code/
 ├── INSTALAR.bat            instala / atualiza tudo
 ├── INICIAR.bat             abre o launcher (caminho 2-5-1 com o pool, 2-1-1 sem)
 ├── INICIAR-POOL.bat        abre direto no pool (2-5-1 sem menus)
+├── tests/run-tests.ps1     testes do pool (sem túnel, sem rede)
+├── .github/workflows/      testes no GitHub a cada push
 ├── POOL.bat                menu do pool de túneis
 ├── FILA.bat                fila de pedidos em paralelo
 ├── launcher/
@@ -324,6 +333,12 @@ openinfinite-code/
 ---
 
 ## 🗒️ Versões
+
+### warp-pool.ps1 1.7
+- **Testes automáticos** (`tests\run-tests.ps1`, 65 verificações, sem dependências) e **GitHub Actions**.
+- **Logs com limite** (`recovery-events.jsonl` 2 MB, `rotation-history.jsonl` 1 MB; o excesso vai para `.1`).
+- **`-Action tidy`** / `POOL.bat` → **L**: arquiva cópias antigas da pasta de estado; `-Prune` apaga cópias antigas do banco de chats e `.bak` velhos.
+- Correção: trocas automáticas não mexem mais em slot com claim `lease`.
 
 ### warp-pool.ps1 1.6
 - **Painel:** `-Action dashboard` (ou `POOL.bat` → 9) gera `pool\dashboard.html` com túneis (IP, família, nota, estado, janela), famílias por nota, últimas trocas (quanto cada IP durou, troca instantânea ou não) e eventos. O vigia regrava a página a cada ciclo e ela recarrega a cada 30 s. Tema claro e escuro.
