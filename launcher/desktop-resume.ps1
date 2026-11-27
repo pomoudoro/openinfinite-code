@@ -74,6 +74,21 @@ function Write-Result([hashtable]$Values) {
     [IO.File]::WriteAllLines($ResultFile, [string[]]$lines, (New-Object Text.UTF8Encoding($false)))
 }
 
+# The hidden instruction (pt-BR). Built from char codes: this .ps1 has no BOM, and Windows
+# PowerShell 5.1 would read accented literals as ANSI.
+function Get-HiddenResumeText {
+    if ($env:OC_RESUME_HIDDEN_TEXT) { return [string]$env:OC_RESUME_HIDDEN_TEXT }
+    $a = [char]0xE1  # a acute
+    return ('O limite gratuito foi atingido e o IP foi trocado. Continue a tarefa anterior exatamente de onde parou, sem repetir o que j' + $a + ' foi feito.')
+}
+# Body of the synthetic call: no "description" (a description makes the Desktop show it).
+function Get-SyntheticBody([string]$Text) {
+    return (ConvertTo-Json -Compress -InputObject ([ordered]@{
+        text = $Text
+        metadata = [ordered]@{ source = 'openinfinite'; kind = 'free-limit-resume' }
+        delivery = 'queue'
+    }))
+}
 function Request-Rotate {
     # Wait for the TUI the launcher opened after the send (tui.pid is written by :launch,
     # after :watch_start cleared the old markers), then mark the hit and close it.
@@ -99,6 +114,9 @@ function Request-Rotate {
     }
     Log ("no TUI opened within 90 s after the send; nothing closed session=$Session")
 }
+
+# Tests dot-source this file with OC_RESUME_LIB_ONLY=1 to get the functions without sending anything.
+if ($env:OC_RESUME_LIB_ONLY -eq '1') { return }
 
 if ($Mode -eq 'verify') {
     # Poll the DB until the reply starts or the limit comes back; stop with the Desktop.
@@ -133,6 +151,13 @@ if ($Mode -eq 'verify') {
 $t0 = NowMs
 $message = $env:OC_MSG
 if (-not $message) { $message = 'continue' }
+# openinfinite-code: hidden resume. The official server (opencode 2.3+) has
+# POST /api/session/{id}/synthetic: the text goes to the model and the Desktop timeline skips
+# a synthetic message that has no description, so no "continue" shows in the chat. The text is
+# an instruction to the model, not a chat line. Any failure falls back to the visible prompt.
+$hidden = ($env:OC_RESUME_HIDDEN -eq '1')
+$hiddenText = Get-HiddenResumeText
+$checkText = if ($hidden) { $hiddenText } else { $message }
 $since = $t0 - [int64]$SinceMinutes * 60000
 try {
     $target = Python-Json @('target', '--since-ms', [string]$since)
@@ -152,7 +177,7 @@ Log ("target session=$sid dir=$dir source=$($target.source) title=$($target.titl
 Emit 'resume_target' @{ session = $sid; directory = $dir; source = $target.source }
 
 try {
-    $chk = Python-Json @('check', '--session', $sid, '--since-ms', [string]$since, '--text', $message)
+    $chk = Python-Json @('check', '--session', $sid, '--since-ms', [string]$since, '--text', $checkText)
     if ($chk.already_sent) {
         Log ("already sent after the last limit (at $($chk.sent_ms)): not sending again session=$sid")
         Emit 'resume_skipped_duplicate' @{ session = $sid; sent_ms = $chk.sent_ms }
@@ -180,12 +205,30 @@ if (-not $ready) {
 }
 
 $body = ConvertTo-Json -Compress -InputObject ([ordered]@{ text = $message; delivery = 'queue' })
+$synBody = Get-SyntheticBody $hiddenText
 if ($DryRun) {
-    Log ("dry run: would send to session=$sid dir=$dir ready=${readyMs}ms body=$body")
-    Write-Result @{ STATUS = 'dryrun'; SESSION = $sid; DIR = $dir; SOURCE = $target.source }
+    Log ("dry run: would send to session=$sid dir=$dir ready=${readyMs}ms hidden=$hidden body=" + $(if ($hidden) { $synBody } else { $body }))
+    Write-Result @{ STATUS = 'dryrun'; SESSION = $sid; DIR = $dir; SOURCE = $target.source; HIDDEN = [int]$hidden }
     exit 0
 }
 $sent = $null
+$sentHidden = $false
+if ($hidden) {
+    for ($try = 1; $try -le 2 -and -not $sent; $try++) {
+        $r = Invoke-Exe $cli @('api', 'POST', "/api/session/$sid/synthetic", '--data', $synBody, '--header', 'content-type:application/json') 30
+        if ($r.Code -eq 0 -and $r.Out -match '"id"\s*:\s*"(msg_[^"]+)"') { $sent = $matches[1]; $sentHidden = $true; break }
+        $why = (($r.Out + ' ' + $r.Err).Trim() -replace '\s+', ' ')
+        if ($why.Length -gt 200) { $why = $why.Substring(0, 200) }
+        Log ("hidden send try $try failed code=$($r.Code): $why")
+        # 404 = this OpenCode has no synthetic route: no point in a second try.
+        if ($why -match '404|Not Found|NotFound') { break }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $sent) {
+        Log ("hidden resume unavailable; sending the visible message instead session=$sid")
+        Emit 'resume_hidden_fallback' @{ session = $sid }
+    }
+}
 for ($try = 1; $try -le 3 -and -not $sent; $try++) {
     $r = Invoke-Exe $cli @('api', 'POST', "/api/session/$sid/prompt", '--data', $body, '--header', 'content-type:application/json') 30
     if ($r.Code -eq 0 -and $r.Out -match '"id"\s*:\s*"(msg_[^"]+)"') { $sent = $matches[1]; break }
@@ -200,9 +243,9 @@ if (-not $sent) {
     exit 5
 }
 $sentMs = NowMs
-Log ("delivered session=$sid message=$sent ready=${readyMs}ms total=$($sentMs - $t0)ms")
-Emit 'resume_delivered' @{ session = $sid; message = $sent; ready_ms = $readyMs; total_ms = ($sentMs - $t0) }
-Write-Result @{ STATUS = 'sent'; SESSION = $sid; DIR = $dir; SOURCE = $target.source; MSGID = $sent }
+Log ("delivered session=$sid message=$sent hidden=$sentHidden ready=${readyMs}ms total=$($sentMs - $t0)ms")
+Emit 'resume_delivered' @{ session = $sid; message = $sent; hidden = $sentHidden; ready_ms = $readyMs; total_ms = ($sentMs - $t0) }
+Write-Result @{ STATUS = 'sent'; SESSION = $sid; DIR = $dir; SOURCE = $target.source; MSGID = $sent; HIDDEN = [int]$sentHidden }
 
 $psExe = Join-Path $PSHOME 'powershell.exe'
 $self = $MyInvocation.MyCommand.Path

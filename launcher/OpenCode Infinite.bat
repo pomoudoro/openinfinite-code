@@ -224,6 +224,8 @@ set "RESUME_MSG=voltamos, pode continuar e retomar de onde parou"
 REM 1 = the automatic resume runs unattended (auto-approves tool
 REM permissions). 0 = the resume may stop and wait for permission.
 set "RESUME_AUTO=1"
+REM openinfinite-code: 1 = the Desktop resume goes in as a hidden (synthetic) message, so no "continue" shows in the chat.
+set "RESUME_HIDDEN=1"
 REM Seconds the resume message may run before it is killed and treated
 REM as a dead exit IP. This is the hard stop that keeps the launcher
 REM from sitting on "sending continue" forever.
@@ -951,6 +953,7 @@ call :numcfg WPOOL_LEASE_MIN 15 1440
 call :numcfg WPOOL_BURNED_TTL_HOURS 24
 call :numcfg0 WPOOL_VERIFY_PROBE 0
 call :numcfg0 WPOOL_ALLOW_WARP_TUNNEL 1 1
+call :numcfg0 RESUME_HIDDEN 1 1
 call :numcfg WPOOL_MAX 8 16
 call :numcfg0 WPOOL_DEDUPE_PREFIX 0 64
 
@@ -4026,6 +4029,9 @@ set "OC_CLI=%LOCALAPPDATA%\Programs\ai.opencode.desktop\resources\opencode-cli.e
 set "OC_DATA_DIR=%DATA_DIR%"
 set "OC_LAUNCHLOG=%STATE_DIR%\launcher.log"
 set "OC_RRES=%STATE_DIR%\resume_api.txt"
+REM openinfinite-code: hidden resume only replaces the plain "continue" message; last/custom stay real messages.
+set "OC_RESUME_HIDDEN=0"
+if "%RESUME_HIDDEN%"=="1" if /i not "%RESUME_MODE%"=="last" if /i not "%RESUME_MODE%"=="custom" set "OC_RESUME_HIDDEN=1"
 if exist "%OC_RRES%" del /f /q "%OC_RRES%" >nul 2>&1
 set "RAPI_STATUS="
 set "RAPI_SESSION="
@@ -6344,7 +6350,7 @@ REM - load config.env into this process; derived values follow the port
 REM N36: only the keys the launcher owns are taken from these files, so a
 REM hand-edited PATH, TEMP, STATE_DIR or COMSPEC cannot replace the environment
 REM of the running launcher.
-set "CFG_KEYS= AUTO_ROTATE CHAT_SNAPSHOT IP_FIND_MAX KEY_MENU KEY_QUIT KEY_ROTATE LIMIT_ACTION LIMIT_MODEL LIMIT_ROT_MAX LOG_ENABLED LOG_MASK_IP LOG_MAX_KB MENU_DEFAULT MULTI_INSTANCE OC_API_BASE OC_APP OC_EGRESS_DEFAULT OC_MODE_DEFAULT OC_MODEL OC_OTHER_WINDOW OCUI_COLOR OCUI_FONT OCUI_FONT_SIZE OCUI_ICONS OCUI_LANG OCUI_THEME ON_CLOSE POOL_ENABLE POOL_INTERVAL POOL_MAX PROBE PROBE_BROKEN_MAX PROBE_MODEL PROXY_API_CHECK PROXY_API_CHECK_URL PROXY_FIXED PROXY_LIST_MIN_BYTES PROXY_LIST_URL PROXY_PORT PROXY_PROBE_TIMEOUT PROXY_ROT_MAX PROXY_TRY_MAX QUOTA_RESUME RESUME_AUTO RESUME_MODE RESUME_MSG RESUME_TEXT RESUME_TIMEOUT REUSE_EMPTY ROTATE_COOLDOWN ROTATE_TRIES_MAX TARGET_COUNTRY TARGET_INTERVAL TARGET_MINUTES TARGET_PREFIX TARGET_TRIES TOR_AUTO_INSTALL TOR_BOOTSTRAP_WAIT TOR_HTTP_PORT TOR_SOCKS_PORT TYPE_AHEAD UI_ACC UI_COLOR UPDATE_ASK UPDATE_CHECK VPN_TIMEOUT VPNGATE_COUNTRY VPNGATE_MAX WARP_CALL_TIMEOUT WARP_WAIT WATCH WG_DIR WHERE_TIMEOUT WPOOL_ALLOW_WARP_TUNNEL WPOOL_BURNED_TTL_HOURS WPOOL_COUNT WPOOL_DEDUPE_TRIES WPOOL_ENABLE WPOOL_HEALTH_SEC WPOOL_LEASE_MIN WPOOL_MAX WPOOL_DEDUPE_PREFIX WPOOL_PORT_BASE WPOOL_ROTATE_MODE WPOOL_VERIFY_PROBE WPOOL_WG_DIR "
+set "CFG_KEYS= AUTO_ROTATE CHAT_SNAPSHOT IP_FIND_MAX KEY_MENU KEY_QUIT KEY_ROTATE LIMIT_ACTION LIMIT_MODEL LIMIT_ROT_MAX LOG_ENABLED LOG_MASK_IP LOG_MAX_KB MENU_DEFAULT MULTI_INSTANCE OC_API_BASE OC_APP OC_EGRESS_DEFAULT OC_MODE_DEFAULT OC_MODEL OC_OTHER_WINDOW OCUI_COLOR OCUI_FONT OCUI_FONT_SIZE OCUI_ICONS OCUI_LANG OCUI_THEME ON_CLOSE POOL_ENABLE POOL_INTERVAL POOL_MAX PROBE PROBE_BROKEN_MAX PROBE_MODEL PROXY_API_CHECK PROXY_API_CHECK_URL PROXY_FIXED PROXY_LIST_MIN_BYTES PROXY_LIST_URL PROXY_PORT PROXY_PROBE_TIMEOUT PROXY_ROT_MAX PROXY_TRY_MAX QUOTA_RESUME RESUME_AUTO RESUME_HIDDEN RESUME_MODE RESUME_MSG RESUME_TEXT RESUME_TIMEOUT REUSE_EMPTY ROTATE_COOLDOWN ROTATE_TRIES_MAX TARGET_COUNTRY TARGET_INTERVAL TARGET_MINUTES TARGET_PREFIX TARGET_TRIES TOR_AUTO_INSTALL TOR_BOOTSTRAP_WAIT TOR_HTTP_PORT TOR_SOCKS_PORT TYPE_AHEAD UI_ACC UI_COLOR UPDATE_ASK UPDATE_CHECK VPN_TIMEOUT VPNGATE_COUNTRY VPNGATE_MAX WARP_CALL_TIMEOUT WARP_WAIT WATCH WG_DIR WHERE_TIMEOUT WPOOL_ALLOW_WARP_TUNNEL WPOOL_BURNED_TTL_HOURS WPOOL_COUNT WPOOL_DEDUPE_TRIES WPOOL_ENABLE WPOOL_HEALTH_SEC WPOOL_LEASE_MIN WPOOL_MAX WPOOL_DEDUPE_PREFIX WPOOL_PORT_BASE WPOOL_ROTATE_MODE WPOOL_VERIFY_PROBE WPOOL_WG_DIR "
 if exist "%STATE_DIR%\ui.env" for /f "usebackq tokens=1* delims==" %%a in ("%STATE_DIR%\ui.env") do for %%k in (%CFG_KEYS%) do if /i "%%a"=="%%k" set "%%a=%%b"
 call :ui_style
 if not exist "%STATE_DIR%\config.env" goto :cfg_nums
@@ -6388,6 +6394,7 @@ call :numcfg WPOOL_LEASE_MIN 15 1440
 call :numcfg WPOOL_BURNED_TTL_HOURS 24
 call :numcfg0 WPOOL_VERIFY_PROBE 0
 call :numcfg0 WPOOL_ALLOW_WARP_TUNNEL 1 1
+call :numcfg0 RESUME_HIDDEN 1 1
 call :numcfg WPOOL_MAX 8 16
 call :numcfg0 WPOOL_DEDUPE_PREFIX 0 64
 goto :eof
@@ -7949,6 +7956,7 @@ $Schema = @(
   S 'CHAT_SNAPSHOT' 'Session' 'Show the last messages' 'bool' 1 'After opencode closes, the last messages of the chat are printed so they stay in the scroll-back and can be copied.' 'now'
   S 'TYPE_AHEAD' 'Session' 'Keep what you type' 'bool' 1 'Keys typed while the IP is being renewed are put in the prompt when opencode opens again.' 'now'
   S 'RESUME_AUTO' 'Session' 'Unattended resume' 'bool' 1 'The resume auto-approves tool permissions.' 'now'
+  S 'RESUME_HIDDEN' 'Session' 'Hidden resume' 'bool' 1 'On: in the Desktop, the resume after a rotation goes to the model as a hidden instruction and no message shows in the chat. Only with resume mode continue. Off: the resume message is sent as a normal message.' 'now'
   S 'QUOTA_RESUME' 'Session' 'Resume after quota' 'bool' 1 'After a quota stop the chat resumes on a later start only with a new exit IP and a fresh probe.' 'now'
   S 'RESUME_TIMEOUT' 'Session' 'Resume timeout (s)' 'int' 90 'Seconds before a silent resume counts as a dead IP.' 'now' 10 900
   S 'PROBE' 'Probe' 'Test every new IP' 'bool' 0 'Send one cheap message through each candidate IP. Off by default: each probe uses the free quota and leaves a session.' 'now'

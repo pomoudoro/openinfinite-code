@@ -1,0 +1,79 @@
+name: release
+
+# Publica um release quando uma tag v* e enviada (ex.: git tag v2.64.0 && git push origin v2.64.0).
+# Roda os testes, monta openinfinite-code-<tag>.zip com git archive (os .bat saem com CRLF,
+# como no repositorio), gera SHA256SUMS e cria o release com as notas da secao do CHANGELOG.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag igual ao VERSION
+        shell: bash
+        run: |
+          v="$(tr -d ' \r\n' < VERSION)"
+          if [ "v$v" != "$GITHUB_REF_NAME" ]; then
+            echo "A tag $GITHUB_REF_NAME nao bate com VERSION ($v)."; exit 1
+          fi
+
+      - name: Testes
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
+
+      - name: Montar ZIP e SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          mkdir -p dist
+          zip="openinfinite-code-$tag.zip"
+          git archive --format=zip --prefix=openinfinite-code/ -o "dist/$zip" "$tag"
+          # Hash do ZIP e dos arquivos principais (para conferir depois de extrair).
+          {
+            (cd dist && sha256sum "$zip")
+            sha256sum INSTALAR.bat INICIAR.bat INICIAR-POOL.bat POOL.bat FILA.bat \
+              "launcher/OpenCode Infinite.bat" launcher/warp-pool.ps1 launcher/desktop-resume.ps1 \
+              launcher/resume-runner.ps1 launcher/resume-target.py launcher/multi-dispatcher.ps1 \
+              launcher/queue-add.ps1 launcher/device-reset.ps1 scripts/instalar.ps1
+          } > dist/SHA256SUMS
+          cat dist/SHA256SUMS
+
+      - name: Notas do release (secao do CHANGELOG)
+        shell: bash
+        run: |
+          tag="$GITHUB_REF_NAME"
+          awk -v h="## $tag" '
+            index($0, h) == 1 { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > dist/notes.md
+          {
+            echo ""
+            echo "### Conferir o download"
+            echo ""
+            echo '```powershell'
+            echo "Get-FileHash .\\openinfinite-code-$tag.zip -Algorithm SHA256"
+            echo '```'
+            echo ""
+            echo "Compare com a linha do ZIP no \`SHA256SUMS\`."
+          } >> dist/notes.md
+          cat dist/notes.md
+
+      - name: Publicar
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          gh release create "$tag" "dist/openinfinite-code-$tag.zip" dist/SHA256SUMS \
+            --title "OpenInfinite Code $tag" --notes-file dist/notes.md --verify-tag
