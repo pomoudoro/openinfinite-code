@@ -245,6 +245,24 @@ $launcherText = [IO.File]::ReadAllText($bat)
 Check 'launcher tem a opcao RESUME_HIDDEN (padrao, validacao, Definicoes)' (([regex]::Matches($launcherText, 'RESUME_HIDDEN')).Count -ge 6)
 Check 'launcher so esconde no modo continue' ($launcherText -match 'if "%RESUME_HIDDEN%"=="1" if /i not "%RESUME_MODE%"=="last" if /i not "%RESUME_MODE%"=="custom" set "OC_RESUME_HIDDEN=1"')
 
+# Terminal windows: resume-runner.ps1 (private server + synthetic message).
+$deskText = Get-HiddenResumeText
+$deskBody = Get-SyntheticBody $deskText
+$env:OC_RESUME_LIB_ONLY = '1'
+. (Join-Path $repo 'launcher\resume-runner.ps1')
+$env:OC_RESUME_LIB_ONLY = ''
+Check 'terminal usa o mesmo texto oculto do Desktop' ((Get-HiddenResumeText) -eq $deskText)
+Check 'terminal usa o mesmo corpo sintetico do Desktop' ((Get-SyntheticBody (Get-HiddenResumeText)) -eq $deskBody)
+$fl = Get-ResumeFlags '-s ses_abc --standalone --auto -m opencode/deepseek-v4.1-flash-free#max'
+Check 'flags: sessao, standalone, auto e modelo' ($fl.session -eq 'ses_abc' -and $fl.standalone -and $fl.auto -and $fl.model -eq 'opencode/deepseek-v4.1-flash-free#max')
+$fl2 = Get-ResumeFlags '-c --auto'
+Check 'flags sem -s: sem sessao (modo oculto nao roda)' (-not $fl2.session -and -not $fl2.standalone)
+$mb = Get-ModelBody 'opencode/deepseek-v4.1-flash-free#max' | ConvertFrom-Json
+Check 'corpo do modelo aninhado em "model"' ($mb.model.id -eq 'deepseek-v4.1-flash-free' -and $mb.model.providerID -eq 'opencode' -and $mb.model.variant -eq 'max')
+Check 'modelo sem variante' (((Get-ModelBody 'opencode/x') | ConvertFrom-Json).model.PSObject.Properties['variant'] -eq $null)
+Check 'modelo invalido = sem troca' ((Get-ModelBody 'semprovedor') -eq '')
+Check 'launcher liga o oculto no terminal so com sessao e --standalone' ($launcherText -match 'if "%RESUME_HIDDEN%"=="1" if defined CAP_STANDALONE if /i not "%RESUME_MODE%"=="last" if /i not "%RESUME_MODE%"=="custom" if defined RT_SESS set "OC_RESUME_HIDDEN=1"')
+
 # resume-target.py check: a hidden resume waiting in session_inbox, or already a synthetic message,
 # counts as sent; a plain user message still counts; other text does not.
 $py = (Get-Command python -ErrorAction SilentlyContinue).Source

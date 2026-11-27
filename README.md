@@ -18,7 +18,7 @@ Bateu o limite? O IP é trocado sozinho e o chat continua no mesmo ponto, sem vo
 ## 💡 Como funciona, em 30 segundos
 
 - O OpenCode tem modelos grátis, mas com um **limite de mensagens por IP**. Quando ele chega, aparece *"You've used today's free messages"*.
-- O OpenInfinite Code fica de olho nisso. Quando o limite chega, ele **troca o IP** (pelo Cloudflare WARP, de graça) e o **mesmo chat continua sozinho**. No Desktop isso é invisível: a IA recebe uma instrução oculta para continuar de onde parou, e nenhuma mensagem aparece na conversa.
+- O OpenInfinite Code fica de olho nisso. Quando o limite chega, ele **troca o IP** (pelo Cloudflare WARP, de graça) e o **mesmo chat continua sozinho**, de forma invisível: a IA recebe uma instrução oculta para continuar de onde parou, e nenhuma mensagem aparece na conversa (no Desktop e nas janelas de terminal).
 - Só o OpenCode passa pelo IP trocado. O navegador e o resto do PC continuam na sua conexão normal.
 
 > [!NOTE]
@@ -71,7 +71,7 @@ Este projeto nasceu do [OpenCode Infinite](https://gitlab.com/jekooo/opencode-in
 | App com botões (Auto, Reset limit, Status, Stop) em vez de menu de terminal | ❌ | ✅ | **original** |
 | Funciona **sem o app Cloudflare WARP** instalado (WARP embutido) | ❌ | ✅ | **original** |
 | Linux e macOS | ❌ (só Windows) | ✅ | **original** |
-| Retomada invisível (sem mensagem no chat) | ✅ (no Desktop; no terminal ainda aparece) | ✅ | empate |
+| Retomada invisível (sem mensagem no chat) | ✅ (Desktop e terminal) | ✅ | empate |
 | Mullvad, Windscribe e Route64 | ❌ | ✅ (no app) | **original** |
 | Provedores DeepAI e OmniRoute prontos | ❌ | ✅ | **original** |
 | Releases com `SHA256SUMS` para conferir o download | ✅ | ✅ | empate |
@@ -147,7 +147,7 @@ Instale o que faltar e rode o `INSTALAR.bat` de novo até aparecer "Pronto". Ele
 > [!TIP]
 > Use o **[2]** da tela inicial, não o [1] *opencode automático*: o [1] pula as escolhas e abre uma sessão nova, enquanto o [2] passa pela conexão e pega um IP novo antes de abrir o Desktop, que é o caminho testado com a retomada automática.
 
-Depois é só conversar. **Quando o limite chegar, você não precisa fazer nada:** o launcher troca o IP, confere que mudou e o mesmo chat continua. No Desktop a retomada é invisível; para ver uma mensagem no chat em vez disso, desligue **5. Definições → Sessão → Retomada invisível**.
+Depois é só conversar. **Quando o limite chegar, você não precisa fazer nada:** o launcher troca o IP, confere que mudou e o mesmo chat continua, sem nenhuma mensagem aparecer na conversa (no Desktop e no terminal). Para ver uma mensagem no chat em vez disso, desligue **5. Definições → Sessão → Retomada invisível**.
 
 ---
 

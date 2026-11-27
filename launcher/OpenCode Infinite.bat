@@ -3215,6 +3215,11 @@ if "%RAUTH%"=="no" (
     if not defined OPT_AUTO echo   [!] auth.json ausente - o CLI pode nao estar autenticado.
 )
 call :log "resume: session=%RT_SESS% dir=%RT_DIR% model=%OC_MODEL% mode=%APP_MODE% timeout=%RESUME_TIMEOUT%s ip=%IP% egress=%EGRESS% proxy=%RPX% svc=%SVC_PROXIED% auth=%RAUTH% cmd=opencode run %RARGS%" resume
+REM openinfinite-code: hidden resume in terminal windows too. resume-runner.ps1 starts a private
+REM server, sends the resume as a synthetic message and waits for the turn (needs -s and --standalone).
+set "OC_RESUME_HIDDEN=0"
+if "%RESUME_HIDDEN%"=="1" if defined CAP_STANDALONE if /i not "%RESUME_MODE%"=="last" if /i not "%RESUME_MODE%"=="custom" if defined RT_SESS set "OC_RESUME_HIDDEN=1"
+if "%RESUME_HIDDEN%"=="1" if defined CAP_STANDALONE if /i not "%RESUME_MODE%"=="last" if /i not "%RESUME_MODE%"=="custom" if defined PIN_SESS set "OC_RESUME_HIDDEN=1"
 REM v2.60.23: run inside the chat's own folder, so its tools work on the right project.
 if defined RT_DIR if exist "%RT_DIR%\" pushd "%RT_DIR%"
 call :resume_run %RARGS%
@@ -7956,7 +7961,7 @@ $Schema = @(
   S 'CHAT_SNAPSHOT' 'Session' 'Show the last messages' 'bool' 1 'After opencode closes, the last messages of the chat are printed so they stay in the scroll-back and can be copied.' 'now'
   S 'TYPE_AHEAD' 'Session' 'Keep what you type' 'bool' 1 'Keys typed while the IP is being renewed are put in the prompt when opencode opens again.' 'now'
   S 'RESUME_AUTO' 'Session' 'Unattended resume' 'bool' 1 'The resume auto-approves tool permissions.' 'now'
-  S 'RESUME_HIDDEN' 'Session' 'Hidden resume' 'bool' 1 'On: in the Desktop, the resume after a rotation goes to the model as a hidden instruction and no message shows in the chat. Only with resume mode continue. Off: the resume message is sent as a normal message.' 'now'
+  S 'RESUME_HIDDEN' 'Session' 'Hidden resume' 'bool' 1 'On: the resume after a rotation goes to the model as a hidden instruction and no message shows in the chat (Desktop and terminal windows). Only with resume mode continue. Off: the resume message is sent as a normal message.' 'now'
   S 'QUOTA_RESUME' 'Session' 'Resume after quota' 'bool' 1 'After a quota stop the chat resumes on a later start only with a new exit IP and a fresh probe.' 'now'
   S 'RESUME_TIMEOUT' 'Session' 'Resume timeout (s)' 'int' 90 'Seconds before a silent resume counts as a dead IP.' 'now' 10 900
   S 'PROBE' 'Probe' 'Test every new IP' 'bool' 0 'Send one cheap message through each candidate IP. Off by default: each probe uses the free quota and leaves a session.' 'now'
