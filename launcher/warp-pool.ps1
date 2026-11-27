@@ -8,7 +8,7 @@
 # Never prints PrivateKey or PresharedKey.
 [CmdletBinding()]
 param(
-  [ValidateSet('up','status','claim','release','rotate','verify','down','daemon','reap','grow','boot','spawn','stats','dashboard')]
+  [ValidateSet('up','status','claim','release','rotate','verify','down','daemon','reap','grow','boot','spawn','stats','dashboard','tidy')]
   [string]$Action = 'status',
   # spawn: the action the detached process runs (boot or daemon).
   [ValidateSet('boot','daemon')]
@@ -29,6 +29,8 @@ param(
   [switch]$Swap,
   # dashboard: write pool\dashboard.html without opening it.
   [switch]$NoOpen,
+  # tidy: also delete old opencode.db snapshots and old .bak copies in backup\ (see Invoke-Tidy).
+  [switch]$Prune,
   [switch]$AllowWarpTunnel,
   [string]$State = ($env:LOCALAPPDATA + '\opencode-infinite'),
   [int]$PortBase = 0,
@@ -54,7 +56,7 @@ $PeerEndpoint = '162.159.192.1:2408'
 # answered on all of these; 162.159.193.1:2408 did not. A rebuilt slot moves to the next one, so
 # an endpoint that stopped answering the slot's handshakes is not retried in a loop.
 $PeerEndpoints = @('162.159.192.1:2408', '188.114.97.1:2408', '162.159.195.1:2408', '162.159.192.1:4500', '188.114.96.1:500')
-$ScriptVersion = '1.6'
+$ScriptVersion = '1.7'
 
 $SelfPath = $MyInvocation.MyCommand.Path
 $State = [IO.Path]::GetFullPath($State)
@@ -632,6 +634,12 @@ function Test-OwnerAlive($owner) {
   try { $procId = [int]$owner.pid; $ticks = [long]$owner.ticks } catch { return $null }
   if ($procId -le 0 -or $ticks -le 0) { return $null }
   return ($null -ne (Get-ProcessByPidStart $procId $ticks))
+}
+# v1.7: in use = an owner that is alive OR unknown (a lease claim, or one written before v1.1).
+# Rotations the pool starts by itself (burned replacement, family dedupe) never touch such a slot.
+function Test-SlotInUse($s) {
+  if (-not $s -or -not $s.owner) { return $false }
+  return ((Test-OwnerAlive $s.owner) -ne $false)
 }
 function Instance-EgressPath([string]$inst) {
   return (Join-Path (Join-Path (Join-Path $State 'instances') $inst) 'egress.json')
@@ -1646,12 +1654,12 @@ function Invoke-DaemonDedupe {
     $group = @($byFam[$fam])
     if ($group.Count -le 1) { continue }
     # Keep an owned slot (or the lowest); move the free others.
-    $keep = @($group | Where-Object { (Test-OwnerAlive $_.owner) -eq $true } | Select-Object -First 1)
+    $keep = @($group | Where-Object { Test-SlotInUse $_ } | Select-Object -First 1)
     if (-not $keep) { $keep = @($group | Select-Object -First 1) }
     foreach ($s in $group) {
       $n = [int]$s.slot
       if ($n -eq [int]$keep[0].slot) { continue }
-      if ((Test-OwnerAlive $s.owner) -eq $true) { continue }
+      if (Test-SlotInUse $s) { continue }
       if (-not (Test-SelfRotateDue $n)) { continue }
       if (Test-Path -LiteralPath $stopFlag) { return }
       $lk = Lock-Slot $n 2000
@@ -1675,7 +1683,7 @@ function Invoke-ReplaceBurned {
     $n = [int]$s.slot
     if ($Count -ge 1 -and $n -gt $Count) { continue }
     if ($s.health -ne 'up' -or -not $s.ip) { continue }
-    if ((Test-OwnerAlive $s.owner) -eq $true) { continue }
+    if (Test-SlotInUse $s) { continue }
     $selfBurned = (@(Get-BurnedIps $s) -contains [string]$s.ip)
     if (-not $selfBurned -and -not (Test-FamilyBad ([string]$s.ip))) { continue }
     # A slot left behind by a swap (its exit in its own burned[]) is due at once (no earlier try);
@@ -1799,6 +1807,7 @@ function Invoke-Daemon {
       $slots = @(Get-AllSlots)
       Write-PoolStatus $slots
       try { Write-Dashboard | Out-Null } catch { Write-Event 'dashboard-error' @{ error = $_.Exception.Message } }
+      Limit-PoolLogs
       $end = (Get-Date).AddSeconds($interval)
       while ((Get-Date) -lt $end -and -not (Test-Path -LiteralPath $stopFlag)) { Start-Sleep -Seconds 1 }
     }
@@ -2027,13 +2036,13 @@ function Write-Dashboard {
       if ((Test-OwnerAlive $s.owner) -eq $false) { $owner += ' (fechada)' }
     }
     if ($s.health -eq 'up' -and $fam) { $famsUp[$fam] = 1 }
-    $tag = 'ok'; $state = 'boa'
-    if ($s.health -ne 'up') { $tag = 'down'; $state = [string]$s.health }
-    elseif ($bad) { $tag = 'bad'; $state = 'queimada' }
-    elseif ($selfB) { $tag = 'warn'; $state = 'IP recem-queimado' }
+    $tag = 'ok'; $stateLbl = 'boa'
+    if ($s.health -ne 'up') { $tag = 'down'; $stateLbl = [string]$s.health }
+    elseif ($bad) { $tag = 'bad'; $stateLbl = 'queimada' }
+    elseif ($selfB) { $tag = 'warn'; $stateLbl = 'IP recem-queimado' }
     $since = '-'
     if ($s.PSObject.Properties['ipSince'] -and $s.ipSince) { $since = Fmt-Ago $s.ipSince }
-    [void]$rowsS.Append('<tr><td class="n">' + $s.slot + '</td><td class="n">' + $s.port + '</td><td class="mono">' + (HtmlEnc $ip) + '</td><td class="mono">' + (HtmlEnc $fam) + '</td><td class="n">' + $score + '</td><td><span class="pill ' + $tag + '">' + (HtmlEnc $state) + '</span></td><td>' + (HtmlEnc $owner) + '</td><td>' + (HtmlEnc ([string]$s.colo)) + '</td><td class="n">' + $since + '</td><td class="n">' + (Fmt-Ago $s.verifiedAt) + '</td></tr>')
+    [void]$rowsS.Append('<tr><td class="n">' + $s.slot + '</td><td class="n">' + $s.port + '</td><td class="mono">' + (HtmlEnc $ip) + '</td><td class="mono">' + (HtmlEnc $fam) + '</td><td class="n">' + $score + '</td><td><span class="pill ' + $tag + '">' + (HtmlEnc $stateLbl) + '</span></td><td>' + (HtmlEnc $owner) + '</td><td>' + (HtmlEnc ([string]$s.colo)) + '</td><td class="n">' + $since + '</td><td class="n">' + (Fmt-Ago $s.verifiedAt) + '</td></tr>')
   }
   # Families, best first
   $famRows = @()
@@ -2145,6 +2154,120 @@ function Invoke-Dashboard {
   return 0
 }
 
+# ---- log limits and tidy (v1.7) -----------------------------------------------------------------
+# recovery-events.jsonl and rotation-history.jsonl grew without bound (the launcher, the watcher and
+# the pool all append to the first). Past MaxKB the oldest lines move to <file>.1 (one generation,
+# overwritten) and the newest KeepLines stay, so 'stats', the dashboard and the family seeding
+# still see recent history. Checked by the daemon once per cycle and by 'tidy'.
+function Limit-LogFile([string]$path, [int]$maxKB, [int]$keepLines) {
+  try {
+    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    if ((Get-Item -LiteralPath $path).Length -le ($maxKB * 1024)) { return $false }
+    $all = [IO.File]::ReadAllLines($path)
+    if ($all.Count -le $keepLines) { return $false }
+    $cut = $all.Count - $keepLines
+    $enc = New-Object Text.UTF8Encoding($false)
+    [IO.File]::WriteAllLines($path + '.1', [string[]]($all[0..($cut - 1)]), $enc)
+    [IO.File]::WriteAllLines($path, [string[]]($all[$cut..($all.Count - 1)]), $enc)
+    Write-Event 'log-trimmed' @{ file = (Split-Path -Leaf $path); moved = $cut; kept = $keepLines }
+    return $true
+  } catch { return $false }
+}
+function Limit-PoolLogs {
+  Limit-LogFile $eventsFile 2048 5000 | Out-Null
+  Limit-LogFile (Join-Path $poolDir 'rotation-history.jsonl') 1024 3000 | Out-Null
+}
+function Get-DirBytes([string]$path) {
+  try { return [long](@(Get-ChildItem -LiteralPath $path -Recurse -File -Force -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum) } catch { return 0 }
+}
+function Fmt-Bytes([long]$b) {
+  if ($b -ge 1GB) { return ([Math]::Round($b / 1GB, 2)).ToString([Globalization.CultureInfo]::InvariantCulture) + ' GB' }
+  if ($b -ge 1MB) { return ([Math]::Round($b / 1MB, 1)).ToString([Globalization.CultureInfo]::InvariantCulture) + ' MB' }
+  return ([Math]::Round($b / 1KB, 0)).ToString() + ' KB'
+}
+# tidy: moves old copies made before past edits (config.env.before-*, OpenCode Infinite backup
+# *.bat, watcher.ps1.before-*, ...) from the state root into backup\estado-antigo\, removes the
+# pool's own leftover trace-*.out temp files, trims the logs and reports what backup\ holds.
+# Nothing the launcher reads is touched and nothing is deleted except the pool's temp files.
+# tidy -Prune also DELETES, inside backup\: opencode.db snapshot folders except the newest, and
+# <file>.<stamp>.bak copies older than 14 days except the 2 newest per file.
+function Invoke-Tidy {
+  Ensure-Dirs
+  $bk = Join-Path $State 'backup'
+  $arch = Join-Path $bk 'estado-antigo'
+  $patterns = @('config.env.*', 'config.json.*', 'patterns.conf.*', 'recovery.ps1.*', 'watcher.ps1.*', 'OpenCode Infinite backup *.bat', 'warp-state-before-*.txt')
+  $moved = 0
+  $cutoff = (Get-Date).AddDays(-2)
+  foreach ($pat in $patterns) {
+    foreach ($f in @(Get-ChildItem -LiteralPath $State -Filter $pat -File -ErrorAction SilentlyContinue)) {
+      if ($f.LastWriteTime -gt $cutoff) { continue }
+      # Win32 -Filter 'config.json.*' also matches 'config.json' itself: -like is the real test,
+      # and the live files are never moved.
+      if ($f.Name -notlike $pat) { continue }
+      if (@('config.env', 'config.json', 'patterns.conf', 'recovery.ps1', 'watcher.ps1') -contains $f.Name) { continue }
+      if (-not (Test-Path -LiteralPath $arch)) { New-Item -ItemType Directory -Force -Path $arch | Out-Null }
+      $dest = Join-Path $arch $f.Name
+      if (Test-Path -LiteralPath $dest) { $dest = Join-Path $arch ($f.BaseName + '.' + (Get-Date).ToString('yyyyMMddHHmmss') + $f.Extension) }
+      try { Move-Item -LiteralPath $f.FullName -Destination $dest -ErrorAction Stop; $moved++; Write-Host ('  arquivado: ' + $f.Name) } catch { Write-Host ('  nao movido: ' + $f.Name + ' (' + $_.Exception.Message + ')') }
+    }
+  }
+  $temps = 0
+  foreach ($f in @(Get-ChildItem -LiteralPath $poolDir -Filter 'trace-*.out*' -File -ErrorAction SilentlyContinue)) {
+    if ($f.LastWriteTime -gt (Get-Date).AddHours(-1)) { continue }
+    try { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction Stop; $temps++ } catch { }
+  }
+  # families.json (/32 keys) is no longer read since 1.4.
+  $oldFam = Join-Path $poolDir 'families.json'
+  if (Test-Path -LiteralPath $oldFam) {
+    if (-not (Test-Path -LiteralPath $arch)) { New-Item -ItemType Directory -Force -Path $arch | Out-Null }
+    try { Move-Item -LiteralPath $oldFam -Destination (Join-Path $arch 'families-v1.json') -Force -ErrorAction Stop; $moved++; Write-Host '  arquivado: pool\families.json (formato antigo)' } catch { }
+  }
+  Limit-PoolLogs
+  Write-Host ('arquivos antigos movidos para backup\estado-antigo: ' + $moved + '   temporarios do pool apagados: ' + $temps)
+  if (-not (Test-Path -LiteralPath $bk)) { return 0 }
+  # What backup\ holds, biggest first, and what -Prune would remove.
+  $items = @(Get-ChildItem -LiteralPath $bk -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'estado-antigo' })
+  $rows = foreach ($i in $items) {
+    $size = $(if ($i.PSIsContainer) { Get-DirBytes $i.FullName } else { [long]$i.Length })
+    $isDb = ($i.PSIsContainer -and (Test-Path -LiteralPath (Join-Path $i.FullName 'opencode.db')))
+    [pscustomobject]@{ Item = $i; Name = $i.Name; Size = $size; Db = $isDb; When = $i.LastWriteTime }
+  }
+  $toPrune = @()
+  $dbs = @($rows | Where-Object { $_.Db } | Sort-Object When -Descending)
+  if ($dbs.Count -gt 1) { $toPrune += @($dbs | Select-Object -Skip 1) }
+  $baks = @($rows | Where-Object { -not $_.Item.PSIsContainer -and $_.Name -match '^(.+?)\.(\d{8}-\d{6})(\..*)?\.bak$' })
+  foreach ($g in @($baks | Group-Object { if ($_.Name -match '^(.+?)\.\d{8}-\d{6}') { $Matches[1] } else { $_.Name } })) {
+    $old = @($g.Group | Sort-Object When -Descending | Select-Object -Skip 2 | Where-Object { $_.When -lt (Get-Date).AddDays(-14) })
+    $toPrune += $old
+  }
+  $total = [long](@($rows | Measure-Object Size -Sum).Sum)
+  $pruneBytes = [long](@($toPrune | Measure-Object Size -Sum).Sum)
+  Write-Host ''
+  Write-Host ('backup\ ocupa ' + (Fmt-Bytes $total) + ' em ' + $rows.Count + ' itens. Maiores:')
+  $rows | Sort-Object Size -Descending | Select-Object -First 8 | ForEach-Object {
+    Write-Host ('  ' + (Fmt-Bytes $_.Size).PadLeft(9) + '  ' + $_.Name + $(if ($_.Db) { '   (copia do banco de chats do OpenCode)' } else { '' }))
+  }
+  if (-not $toPrune.Count) { Write-Host 'nada para -Prune apagar.'; return 0 }
+  if (-not $Prune) {
+    Write-Host ('-Prune apagaria ' + $toPrune.Count + ' itens (' + (Fmt-Bytes $pruneBytes) + '): copias antigas do banco de chats (fica a mais nova) e .bak com mais de 14 dias (ficam os 2 mais novos de cada arquivo).')
+    return 0
+  }
+  $freed = [long]0
+  foreach ($p in $toPrune) {
+    try {
+      Remove-Item -LiteralPath $p.Item.FullName -Recurse -Force -ErrorAction Stop
+      $freed += $p.Size
+      Write-Host ('  apagado: ' + $p.Name + ' (' + (Fmt-Bytes $p.Size) + ')')
+    } catch { Write-Host ('  nao apagado: ' + $p.Name + ' (' + $_.Exception.Message + ')') }
+  }
+  Write-Event 'tidy-prune' @{ items = $toPrune.Count; freedBytes = $freed }
+  Write-Host ('liberado: ' + (Fmt-Bytes $freed))
+  return 0
+}
+
+# Tests dot-source this file with WPOOL_LIB_ONLY=1 to get the functions without running an action.
+if ($env:WPOOL_LIB_ONLY -eq '1') { return }
+
 try {
   Ensure-Dirs
   $code = 0
@@ -2154,6 +2277,7 @@ try {
     'spawn' { $code = Invoke-Spawn }
     'stats' { $code = Invoke-Stats }
     'dashboard' { $code = Invoke-Dashboard }
+    'tidy' { $code = Invoke-Tidy }
     'up' { $code = Invoke-Up }
     'status' { $code = Invoke-Status }
     'claim' { $code = Invoke-Claim }

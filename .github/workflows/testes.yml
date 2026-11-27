@@ -1,0 +1,26 @@
+name: testes
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Testes do pool (Windows PowerShell 5.1)
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1
+
+      # O launcher roda no Windows PowerShell 5.1; o 7 e so um aviso a mais.
+      - name: Testes do pool (PowerShell 7, informativo)
+        shell: pwsh
+        continue-on-error: true
+        run: pwsh -NoProfile -File tests/run-tests.ps1
