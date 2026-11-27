@@ -42,5 +42,13 @@ for %%F in ("warp-pool.ps1" "multi-dispatcher.ps1" "queue-add.ps1" "device-reset
   )
 )
 
+REM Traducoes: o launcher le %STATEDIR%\lang\*.json. Antes so o INSTALAR.bat as copiava.
+if exist "%STATEDIR%\lang\" for %%F in ("%SRC%\langs\*.json") do (
+  fc /b "%%~fF" "%STATEDIR%\lang\%%~nxF" >nul 2>&1 || (
+    echo   atualizando traducao %%~nxF...
+    copy /y "%%~fF" "%STATEDIR%\lang\%%~nxF" >nul
+  )
+)
+
 call "%APPBAT%" %*
 exit /b %errorlevel%

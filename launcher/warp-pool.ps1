@@ -56,7 +56,7 @@ $PeerEndpoint = '162.159.192.1:2408'
 # answered on all of these; 162.159.193.1:2408 did not. A rebuilt slot moves to the next one, so
 # an endpoint that stopped answering the slot's handshakes is not retried in a loop.
 $PeerEndpoints = @('162.159.192.1:2408', '188.114.97.1:2408', '162.159.195.1:2408', '162.159.192.1:4500', '188.114.96.1:500')
-$ScriptVersion = '1.7'
+$ScriptVersion = '1.8'
 
 $SelfPath = $MyInvocation.MyCommand.Path
 $State = [IO.Path]::GetFullPath($State)
@@ -1964,6 +1964,20 @@ function Invoke-Stats {
   $hist = Join-Path $poolDir 'rotation-history.jsonl'
   if (-not (Test-Path -LiteralPath $hist)) { New-Item -ItemType File -Force -Path $hist | Out-Null }
   $rows = @(Get-Content -LiteralPath $hist -Encoding UTF8 | Where-Object { $_.Trim() } | ForEach-Object { try { $_ | ConvertFrom-Json } catch { } } | Where-Object { $_ })
+  # v1.8: the tunnels as they are now, with their family, its score and whether it is burned.
+  $fams0 = Read-Families
+  $now0 = @(Get-AllSlots | Sort-Object slot | ForEach-Object {
+    $ip = [string]$_.ip
+    $own = '-'; if ($_.owner -and $_.owner.instance) { $own = [string]$_.owner.instance }
+    [pscustomobject]@{
+      Slot = [int]$_.slot; Port = [int]$_.port; IP = $(if ($ip) { $ip } else { '-' }); Family = (Get-Family $ip)
+      Score = $(if ($ip) { Get-FamilyScore $ip $fams0 } else { '' }); Burned = [bool]($ip -and (Test-FamilyBad $ip)); Health = [string]$_.health; Owner = $own
+    }
+  })
+  if ($now0.Count) {
+    Write-Host 'tunnels now (family = h1:h2:*:h4::suffix; score: +1 per exit that lasted, -1 per quick limit, newest counts twice):'
+    $now0 | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
+  }
   $quick = 180
   $byPrefix = @($rows | Where-Object { $_.beforePrefix } | Group-Object beforePrefix | ForEach-Object {
     $lived = @($_.Group | Where-Object { [int]$_.livedSec -ge 0 } | ForEach-Object { [int]$_.livedSec } | Sort-Object)
@@ -2015,6 +2029,76 @@ function Read-JsonLines([string]$path, [int]$last) {
 }
 function Kpi([string]$label, [string]$value, [string]$tag) {
   return '<div class="kpi ' + $tag + '"><div class="v">' + (HtmlEnc $value) + '</div><div class="l">' + (HtmlEnc $label) + '</div></div>'
+}
+# v1.8: how long each exit lasted, as two inline SVG charts (no script, no library):
+# a timeline of every rotation of the last 7 days (y = minutes the old IP lasted, sqrt scale,
+# capped at 40 min; red = limit back in under 2 min, green = lasted 5 min+) and the median
+# lifetime per family. Colors come from the page tokens, so dark mode follows.
+function Get-LifetimeCharts {
+  $inv = [Globalization.CultureInfo]::InvariantCulture
+  $rows = @(Read-JsonLines (Join-Path $poolDir 'rotation-history.jsonl') 600)
+  $now = Get-Date
+  $pts = @()
+  foreach ($h in $rows) {
+    $lv = -1; try { $lv = [int]$h.livedSec } catch { }
+    if ($lv -lt 0) { continue }
+    $at = $null; try { $at = [DateTime]::Parse([string]$h.at) } catch { continue }
+    if (($now - $at).TotalDays -gt 7) { continue }
+    $pts += [pscustomobject]@{ at = $at; lv = $lv; fam = (Get-Family ([string]$h.before)); swap = [bool]($h.PSObject.Properties['swap'] -and $h.swap) }
+  }
+  if (-not $pts.Count) { return '<div class="card pad sub">Sem trocas nos &uacute;ltimos 7 dias.</div>' }
+  # Timeline
+  $W = 640; $H = 220; $L = 44; $R = 12; $T = 12; $B = 28
+  $t0 = ($pts | Measure-Object -Property at -Minimum).Minimum
+  $t1 = $now
+  $span = [Math]::Max(1.0, ($t1 - $t0).TotalSeconds)
+  $capMin = 40.0
+  function Y([double]$min) { $v = [Math]::Sqrt([Math]::Min($capMin, [Math]::Max(0, $min)) / $capMin); return $T + ($H - $T - $B) * (1 - $v) }
+  $sb = New-Object Text.StringBuilder
+  [void]$sb.Append('<svg viewBox="0 0 ' + $W + ' ' + $H + '" role="img" aria-label="Dura&ccedil;&atilde;o de cada IP nos &uacute;ltimos 7 dias">')
+  foreach ($m in @(0, 2, 5, 10, 20, 40)) {
+    $y = (Y $m).ToString('0.#', $inv)
+    $cls = $(if ($m -eq 2 -or $m -eq 5) { 'gl ref' } else { 'gl' })
+    [void]$sb.Append('<line class="' + $cls + '" x1="' + $L + '" x2="' + ($W - $R) + '" y1="' + $y + '" y2="' + $y + '"/><text class="ax" x="' + ($L - 6) + '" y="' + $y + '" dy="3" text-anchor="end">' + $m + ' min</text>')
+  }
+  # x labels: start, middle, now
+  foreach ($f in @(0.0, 0.5, 1.0)) {
+    $tt = $t0.AddSeconds($span * $f)
+    $x = ($L + ($W - $L - $R) * $f).ToString('0.#', $inv)
+    $anchor = $(if ($f -eq 0) { 'start' } elseif ($f -eq 1) { 'end' } else { 'middle' })
+    [void]$sb.Append('<text class="ax" x="' + $x + '" y="' + ($H - 8) + '" text-anchor="' + $anchor + '">' + $tt.ToString('dd/MM HH:mm') + '</text>')
+  }
+  foreach ($p in $pts) {
+    $x = ($L + ($W - $L - $R) * (($p.at - $t0).TotalSeconds / $span)).ToString('0.#', $inv)
+    $y = (Y ($p.lv / 60.0)).ToString('0.#', $inv)
+    $cls = $(if ($p.lv -lt $FamQuickSec) { 'pt bad' } elseif ($p.lv -ge $FamGoodSec) { 'pt ok' } else { 'pt warn' })
+    $shape = $(if ($p.swap) { '<rect class="' + $cls + '" x="' + ([double]$x - 4).ToString('0.#', $inv) + '" y="' + ([double]$y - 4).ToString('0.#', $inv) + '" width="8" height="8">' } else { '<circle class="' + $cls + '" cx="' + $x + '" cy="' + $y + '" r="4">' })
+    $end = $(if ($p.swap) { '</rect>' } else { '</circle>' })
+    [void]$sb.Append($shape + '<title>' + (HtmlEnc ($p.at.ToString('dd/MM HH:mm') + ' - ' + $p.fam + ' - durou ' + (Fmt-Sec $p.lv) + $(if ($p.swap) { ' (troca instantanea)' } else { '' }))) + '</title>' + $end)
+  }
+  [void]$sb.Append('</svg>')
+  $timeline = $sb.ToString()
+  # Median per family (top 8 by number of rotations)
+  $groups = @($pts | Group-Object fam | Sort-Object Count -Descending | Select-Object -First 8)
+  $bw = 640; $rowH = 24; $bl = 190; $bh = $rowH * $groups.Count + 8
+  $sb2 = New-Object Text.StringBuilder
+  [void]$sb2.Append('<svg viewBox="0 0 ' + $bw + ' ' + $bh + '" role="img" aria-label="Dura&ccedil;&atilde;o mediana por fam&iacute;lia">')
+  $i = 0
+  foreach ($g in $groups) {
+    $vals = @($g.Group | ForEach-Object { $_.lv } | Sort-Object)
+    $med = $vals[[int][Math]::Floor($vals.Count / 2)]
+    $frac = [Math]::Sqrt([Math]::Min($capMin, $med / 60.0) / $capMin)
+    $w = [Math]::Max(2, ($bw - $bl - 90) * $frac)
+    $y = 4 + $i * $rowH
+    $cls = $(if ($med -lt $FamQuickSec) { 'bar bad' } elseif ($med -ge $FamGoodSec) { 'bar ok' } else { 'bar warn' })
+    [void]$sb2.Append('<text class="lab" x="' + ($bl - 8) + '" y="' + ($y + 15) + '" text-anchor="end">' + (HtmlEnc $g.Name) + '</text>')
+    [void]$sb2.Append('<rect class="' + $cls + '" x="' + $bl + '" y="' + ($y + 4) + '" width="' + $w.ToString('0.#', $inv) + '" height="14" rx="3"><title>' + (HtmlEnc ($g.Name + ': mediana ' + (Fmt-Sec $med) + ' em ' + $vals.Count + ' trocas')) + '</title></rect>')
+    [void]$sb2.Append('<text class="val" x="' + ($bl + $w + 6).ToString('0.#', $inv) + '" y="' + ($y + 15) + '">' + (Fmt-Sec $med) + ' &middot; ' + $vals.Count + 'x</text>')
+    $i++
+  }
+  [void]$sb2.Append('</svg>')
+  $legend = '<div class="legend"><span><i class="dot bad"></i>voltou ao limite em menos de 2 min</span><span><i class="dot warn"></i>2 a 5 min</span><span><i class="dot ok"></i>durou 5 min ou mais</span><span><i class="sq"></i>troca instant&acirc;nea</span></div>'
+  return '<div class="charts"><div class="card pad"><div class="ct">Cada troca dos &uacute;ltimos 7 dias (quanto o IP antigo durou)</div>' + $timeline + $legend + '</div><div class="card pad"><div class="ct">Dura&ccedil;&atilde;o mediana por fam&iacute;lia (&uacute;ltimos 7 dias)</div>' + $sb2.ToString() + '</div></div>'
 }
 function Write-Dashboard {
   $fams = Read-Families
@@ -2131,12 +2215,14 @@ table{border-collapse:collapse;width:100%}th,td{padding:7px 10px;border-bottom:1
 th{font-size:12px;color:var(--mut);font-weight:600}tr:last-child td{border-bottom:0}td.n{text-align:right;font-variant-numeric:tabular-nums}
 .mono{font-family:ui-monospace,Consolas,monospace;font-size:12.5px}.small{font-size:11.5px;white-space:normal;color:var(--mut)}
 .pill{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;font-weight:600}
+.charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px}.pad{padding:12px 14px}.ct{font-size:12.5px;color:var(--mut);margin-bottom:6px}svg{width:100%;height:auto;display:block}.gl{stroke:var(--line);stroke-width:1}.gl.ref{stroke-dasharray:3 3;stroke:var(--mut);opacity:.5}.ax,.lab,.val{fill:var(--mut);font-size:12px;font-family:system-ui,sans-serif}.lab{fill:var(--fg);font-family:ui-monospace,Consolas,monospace;font-size:12px}.pt{stroke:var(--card);stroke-width:1.5}.pt.ok,.bar.ok{fill:var(--ok)}.pt.bad,.bar.bad{fill:var(--bad)}.pt.warn,.bar.warn{fill:var(--warn)}.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12px;color:var(--mut);margin-top:6px}.legend span{display:inline-flex;align-items:center;gap:5px}.dot{display:inline-block;width:9px;height:9px;border-radius:50%}.dot.ok{background:var(--ok)}.dot.bad{background:var(--bad)}.dot.warn{background:var(--warn)}.sq{display:inline-block;width:9px;height:9px;background:var(--mut)}
 .pill.ok{color:var(--ok);background:var(--okb)}.pill.bad{color:var(--bad);background:var(--badb)}.pill.warn{color:var(--warn);background:var(--warnb)}.pill.down{color:var(--down);background:var(--downb)}
 '@
   $sb = New-Object Text.StringBuilder
   [void]$sb.Append('<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta http-equiv="refresh" content="30"><title>Pool de tuneis</title><style>' + $css + '</style></head><body><main>')
   [void]$sb.Append('<h1>Pool de t&uacute;neis</h1><div class="sub">Atualizado ' + (HtmlEnc ($now.ToString('dd/MM/yyyy HH:mm:ss'))) + ' &middot; recarrega a cada 30 s (o vigia regrava a p&aacute;gina a cada ciclo) &middot; warp-pool ' + $ScriptVersion + ' &middot; fam&iacute;lia = h1:h2:*:h4::sufixo</div>')
   [void]$sb.Append('<div class="kpis">' + $k + '</div>')
+  [void]$sb.Append('<h2>Quanto cada IP durou</h2>' + (Get-LifetimeCharts))
   [void]$sb.Append('<h2>T&uacute;neis</h2><div class="card"><table><tr><th>Slot</th><th>Porta</th><th>IP de sa&iacute;da</th><th>Fam&iacute;lia</th><th>Nota</th><th>Estado</th><th>Janela</th><th>Colo</th><th>IP h&aacute;</th><th>Checado h&aacute;</th></tr>' + $rowsS.ToString() + '</table></div>')
   [void]$sb.Append('<h2>Fam&iacute;lias de IP (&uacute;ltimas ' + $BurnedTtlHours + ' h, melhor primeiro)</h2><div class="card"><table><tr><th>Fam&iacute;lia</th><th>Nota</th><th>Duraram 5 min+</th><th>Ca&iacute;ram em menos de 2 min</th><th>Estado</th><th>Em uso</th><th>&Uacute;ltimo resultado</th></tr>' + $rowsF.ToString() + '</table></div>')
   [void]$sb.Append('<h2>&Uacute;ltimas trocas</h2><div class="card"><table><tr><th>H&aacute;</th><th>Slot</th><th>Fam&iacute;lia antes</th><th>Fam&iacute;lia depois</th><th>O IP antigo durou</th><th>Motivo</th><th>Como</th></tr>' + $rowsR.ToString() + '</table></div>')

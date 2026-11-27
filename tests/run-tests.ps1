@@ -173,6 +173,21 @@ $html = [IO.File]::ReadAllText($p)
 Check 'painel gerado' ($html -like '*Pool de t&uacute;neis*')
 Check 'painel lista os IPs' ($html -like '*2a09:bac5:f41:297d::422:7*' -and $html -like '*2a09:bac1:1140:36a8::39c:9*')
 Check 'painel marca queimada' ($html -like '*queimada*')
+Check 'painel tem os dois graficos' (([regex]::Matches($html, '<svg ')).Count -ge 2)
+Check 'painel sem acento quebrado' ($html -notmatch 'Ã')
+$noAscii = @([IO.File]::ReadAllText($poolScript).ToCharArray() | Where-Object { [int]$_ -gt 127 }).Count
+Check 'warp-pool.ps1 so tem ASCII (o PowerShell 5.1 le .ps1 sem BOM como ANSI)' ($noAscii -eq 0) ("$noAscii caracteres")
+
+# ---- 8b. translations ------------------------------------------------------------------------
+Write-Host 'traducoes'
+# pt.json has keys that differ only by case ('Yes'/'yes'), which ConvertFrom-Json rejects: plain text search.
+$ptText = [IO.File]::ReadAllText((Join-Path $repo 'launcher\langs\pt.json'), [Text.Encoding]::UTF8)
+foreach ($key in @('One tunnel per IP family', 'Instant swap on limit', 'Egress pool')) {
+  Check ('pt.json traduz "' + $key + '"') ($ptText.Contains('"' + $key + '": "'))
+}
+$t396 = ([IO.File]::ReadAllLines($bat) | Where-Object { $_ -like 'set "T_396=*' } | Select-Object -First 1)
+$t396key = ($t396 -replace '^set "T_396=', '' -replace '"$', '' -replace '%%', '%')
+Check 'pt.json traduz a mensagem T_396 do --pool' ($ptText.Contains('"' + $t396key + '": "')) $t396key
 
 # ---- 9. log limit ------------------------------------------------------------------------------
 Write-Host 'limite de log'

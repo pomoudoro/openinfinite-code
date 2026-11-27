@@ -843,6 +843,7 @@ set "T_392=  [pool] waiting up to a minute for a tunnel to free up..."
 set "T_393=%%C_WARN%%  [pool] no tunnel free: this window uses WARP instead ^(never the direct IP^).%%C_RST%%"
 set "T_394=%%C_WARN%%  [window] the Desktop app is already open in another window: this window opens OpenCode in the terminal ^(CLI^), with its own tunnel.%%C_RST%%"
 set "T_395=  [pool] preparing the tunnels ^(the first time can take up to 2 minutes^)..."
+set "T_396=%%C_WARN%%  [pool] The tunnel pool is off. Turn it on in Settings - Egress pool - Use the egress pool, or open the normal INICIAR.bat. - code 2%%C_RST%%"
 REM Batch messages are translated from lang\<code>.json; the UI writes lang\messages.txt (data only).
 set "OC_TUI=mki18n"
 set "OC_STATE=%STATE_DIR%"
@@ -1096,12 +1097,11 @@ echo opencode-preset: unknown preset "%PRESET_NAME%" (warp, tor, proxy, pool) - 
 exit /b 2
 REM The pool preset needs the pool on: without it WIREGUARD means .conf files and ends in "continue direct?".
 :ps_pool
-if /i not "%WPOOL_ENABLE%"=="1" (
-  echo O pool de tuneis esta desligado. Ligue em Definicoes - Pool de tuneis - Usar o pool de tuneis,
-  echo ou abra pelo INICIAR.bat normal. - code 2
-  pause
-  exit /b 2
-)
+if /i "%WPOOL_ENABLE%"=="1" goto :ps_pool_on
+call echo %T_396%
+pause
+exit /b 2
+:ps_pool_on
 set "EGRESS=WIREGUARD"
 goto :ps_have
 :ps_have
