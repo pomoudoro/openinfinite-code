@@ -50,7 +50,7 @@ $PeerEndpoint = '162.159.192.1:2408'
 # answered on all of these; 162.159.193.1:2408 did not. A rebuilt slot moves to the next one, so
 # an endpoint that stopped answering the slot's handshakes is not retried in a loop.
 $PeerEndpoints = @('162.159.192.1:2408', '188.114.97.1:2408', '162.159.195.1:2408', '162.159.192.1:4500', '188.114.96.1:500')
-$ScriptVersion = '1.3'
+$ScriptVersion = '1.4'
 
 $SelfPath = $MyInvocation.MyCommand.Path
 $State = [IO.Path]::GetFullPath($State)
@@ -387,41 +387,89 @@ function Get-Prefix64([string]$ip) {
 # Measured on 2026-11-26: exits in 2a09:bac5:... lasted 8-22 min of real use, while every exit in
 # 2a09:bac1:...:36a8 (the range the WARP app also hands out, shared by many users) hit the free
 # limit again within 10 s, so a slot kept rotating into the same burned range in a 10 s loop.
-# A "family" is the first 32 bits of the IPv6 exit. The pool remembers, per family, exits that
+# v1.4: a "family" is no longer the first 32 bits. Measured on 2026-11-26 (25 rotations): inside
+# 2a09:bac5 the exits ...:243c::39c:N burned in 8-89 s while ...:297d::422:N, ...:1c8c::2d8:N and
+# ...:1c96::2d9:N lasted 5-35 min. What tells them apart is hextet 4 plus the interface id without
+# its last hextet; hextet 3 (f41..f47) only follows the endpoint/colo. So the family of
+# 2a09:bac5:f43:243c::39c:4 is "2a09:bac5:*:243c::39c". The pool remembers, per family, exits that
 # hit the limit quickly and exits that lasted, and refuses exits from a family that only burns.
 $FamQuickSec = 120
 $FamGoodSec = 300
-$familiesFile = Join-Path $poolDir 'families.json'
+# families-v2.json: keyed by the narrow family. The old families.json (/32 keys) is left alone.
+$familiesFile = Join-Path $poolDir 'families-v2.json'
 function Get-Family([string]$ip) {
-  $p = Get-Prefix64 $ip
-  if (-not $p) { return '' }
-  $h = $p -split ':'
-  return ($h[0] + ':' + $h[1])
+  if (-not $ip -or $ip -notlike '*:*') { return '' }
+  try { $b = ([Net.IPAddress]::Parse($ip)).GetAddressBytes() } catch { return '' }
+  $h = @()
+  for ($i = 0; $i -lt 16; $i += 2) { $h += ('{0:x}' -f (([int]$b[$i] -shl 8) -bor [int]$b[$i + 1])) }
+  $tail = @($h[4], $h[5], $h[6])
+  while ($tail.Count -gt 0 -and $tail[0] -eq '0') { $tail = @($tail | Select-Object -Skip 1) }
+  return ($h[0] + ':' + $h[1] + ':*:' + $h[3] + '::' + ($tail -join ':'))
 }
 function Read-Families {
+  Import-FamilyHistory
   $o = Read-Json $familiesFile
   $h = @{}
   if ($o) { foreach ($pr in $o.PSObject.Properties) { $h[$pr.Name] = $pr.Value } }
   return $h
 }
-function Get-FamilyCounts([string]$fam) {
-  $r = @{ quick = 0; good = 0 }
-  if (-not $fam) { return $r }
-  $all = Read-Families
-  if (-not $all.ContainsKey($fam)) { return $r }
+# First run of v1.4: seed families-v2.json from rotation-history.jsonl (rows whose reason is
+# quota/watcher, or empty on lines written before the reason existed), with their own timestamps,
+# so the pool already knows yesterday's burned families instead of relearning them in a 10 s loop.
+$script:famSeeded = $false
+function Import-FamilyHistory {
+  if ($script:famSeeded) { return }
+  $script:famSeeded = $true
+  if (Test-Path -LiteralPath $familiesFile) { return }
+  $hist = Join-Path $poolDir 'rotation-history.jsonl'
+  $all = [ordered]@{}
+  if (Test-Path -LiteralPath $hist) {
+    foreach ($l in @(Get-Content -LiteralPath $hist -Encoding UTF8)) {
+      if (-not $l.Trim()) { continue }
+      try { $r = $l | ConvertFrom-Json } catch { continue }
+      # A line with a reason other than quota/watcher (exit, stop, '' = daemon/manual) is not a limit.
+      if ($r.PSObject.Properties['reason'] -and @('quota', 'watcher') -notcontains ([string]$r.reason).ToLowerInvariant()) { continue }
+      $lived = [int]$r.livedSec
+      $fam = Get-Family ([string]$r.before)
+      if (-not $fam -or $lived -lt 0) { continue }
+      $kind = ''
+      if ($lived -lt $FamQuickSec) { $kind = 'quick' } elseif ($lived -ge $FamGoodSec) { $kind = 'good' }
+      if (-not $kind) { continue }
+      if (-not $all.Contains($fam)) { $all[$fam] = [ordered]@{ quick = @(); good = @() } }
+      $all[$fam][$kind] = @($all[$fam][$kind]) + [string]$r.at
+    }
+  }
+  try { Write-Json $familiesFile $all; Write-Event 'families-seeded' @{ families = $all.Count } } catch { }
+}
+# Outcomes of a family within the TTL, oldest first: @{ t = DateTime; k = 'quick'|'good' }.
+function Get-FamilyOutcomes([string]$fam, $all = $null) {
+  $list = @()
+  if (-not $fam) { return $list }
+  if ($null -eq $all) { $all = Read-Families }
+  if (-not $all.ContainsKey($fam)) { return $list }
   $f = $all[$fam]
   $ttl = [Math]::Max(1, $BurnedTtlHours)
   $now = Get-Date
-  foreach ($t in @($f.quick)) { try { if (($now - [DateTime]::Parse([string]$t)).TotalHours -lt $ttl) { $r.quick++ } } catch { } }
-  foreach ($t in @($f.good)) { try { if (($now - [DateTime]::Parse([string]$t)).TotalHours -lt 2) { $r.good++ } } catch { } }
-  return $r
+  foreach ($k in @('quick', 'good')) {
+    foreach ($t in @($f.$k)) {
+      try { $d = [DateTime]::Parse([string]$t); if (($now - $d).TotalHours -lt $ttl) { $list += [pscustomobject]@{ t = $d; k = $k } } } catch { }
+    }
+  }
+  return @($list | Sort-Object t)
 }
-# Burned = 2+ quick limits within the TTL and nothing that lasted in the last 2 hours.
+function Get-FamilyCounts([string]$fam, $all = $null) {
+  $o = @(Get-FamilyOutcomes $fam $all)
+  $last2 = @($o | Select-Object -Last 2)
+  $bad = (@($o | Where-Object { $_.k -eq 'quick' }).Count -ge 2 -and $last2.Count -eq 2 -and @($last2 | Where-Object { $_.k -eq 'quick' }).Count -eq 2)
+  return @{ quick = @($o | Where-Object { $_.k -eq 'quick' }).Count; good = @($o | Where-Object { $_.k -eq 'good' }).Count; burned = $bad }
+}
+# Burned = 2+ quick limits within the TTL and the last two outcomes were both quick. One exit that
+# lasted clears it; a family that worked in the morning but burns now (243c::39c on 26/11) is
+# refused after two quick limits instead of waiting for its good runs to age out.
 function Test-FamilyBad([string]$ip) {
   $fam = Get-Family $ip
   if (-not $fam) { return $false }
-  $c = Get-FamilyCounts $fam
-  return ($c.quick -ge 2 -and $c.good -eq 0)
+  return [bool](Get-FamilyCounts $fam).burned
 }
 function Add-FamilyOutcome([string]$ip, [string]$kind) {
   $fam = Get-Family $ip
@@ -447,6 +495,22 @@ function Add-FamilyOutcome([string]$ip, [string]$kind) {
 function UniqKey([string]$ip) {
   if ($DedupePrefix -eq 64) { $p = Get-Prefix64 $ip; if ($p) { return ($p + '::/64') } }
   return $ip
+}
+# Dedupe key (v1.4): with WPOOL_FAMILY_DEDUPE=1 (default) two free slots in the same family count
+# as the same exit, so 4 tunnels are 4 different ranges and not 2 ranges twice. Only used to
+# rotate free duplicates; Update-Uniqueness (which marks 'degraded') keeps the strict key.
+$FamilyDedupe = EnvOrCfgInt 'WPOOL_FAMILY_DEDUPE' 1
+function DedupeKey([string]$ip) {
+  if ($FamilyDedupe -eq 1) { $f = Get-Family $ip; if ($f) { return $f } }
+  return (UniqKey $ip)
+}
+# Per-slot cooldown for rotations the pool starts by itself (family dedupe, burned replacement):
+# when every family is burned or taken, a slot is retried every 10 min, not every HealthSec.
+$script:selfRotateAt = @{}
+function Test-SelfRotateDue([int]$n) {
+  if ($script:selfRotateAt.ContainsKey($n) -and ((Get-Date) - $script:selfRotateAt[$n]).TotalSeconds -lt 600) { return $false }
+  $script:selfRotateAt[$n] = Get-Date
+  return $true
 }
 function Update-Uniqueness($slots) {
   $seen = @{}
@@ -931,7 +995,7 @@ function Get-BurnedIps($s) {
   return $ips
 }
 # $avoid = IPs that do not count as a new exit (the previous IP plus the slot's live burned[]).
-function Wait-SlotHealthy([int]$n, [int]$seconds, [string[]]$avoid = @(), [switch]$AvoidBadFamily) {
+function Wait-SlotHealthy([int]$n, [int]$seconds, [string[]]$avoid = @(), [switch]$AvoidBadFamily, [string[]]$AvoidFamilies = @()) {
   $end = (Get-Date).AddSeconds($seconds)
   $last = $null
   $refused = 0
@@ -944,14 +1008,16 @@ function Wait-SlotHealthy([int]$n, [int]$seconds, [string[]]$avoid = @(), [switc
       $ip = [string]$m.trace.ip
       $isOld = ($avoidKeys.Count -gt 0 -and $avoidKeys -contains (UniqKey $ip))
       $isBad = ($AvoidBadFamily -and (Test-FamilyBad $ip))
-      if (-not $isOld -and -not $isBad) { return $m }
+      # v1.4: a family another slot already uses (family dedupe) counts as taken.
+      $isTaken = (@($AvoidFamilies | Where-Object { $_ }).Count -gt 0 -and $AvoidFamilies -contains (DedupeKey $ip))
+      if (-not $isOld -and -not $isBad -and -not $isTaken) { return $m }
       $last = $m
       # The exit of a live tunnel rarely changes within seconds: two refusals in a row are enough,
       # the caller moves on to the next endpoint or identity instead of waiting out the timeout.
       $refused++
       if ($refused -ge 2) {
         if ($isBad) { Write-Event 'exit-refused' @{ slot = $n; ip = $ip; family = (Get-Family $ip); endpoint = [string]$s.endpoint } }
-        return @{ ok = $false; reason = $(if ($isBad) { 'burned family' } else { 'same ip' }); trace = $m.trace }
+        return @{ ok = $false; reason = $(if ($isBad) { 'burned family' } elseif ($isTaken) { 'family taken' } else { 'same ip' }); trace = $m.trace }
       }
     }
     Start-Sleep -Milliseconds 1000
@@ -959,7 +1025,7 @@ function Wait-SlotHealthy([int]$n, [int]$seconds, [string[]]$avoid = @(), [switc
   if ($last) { return @{ ok = $false; reason = 'same ip'; trace = $last.trace } }
   return @{ ok = $false; reason = 'no trace'; trace = $null }
 }
-function Start-Slot([int]$n, [switch]$NewIdentity, [string]$PrevIp = '', [int]$WaitSec = 25, [switch]$AvoidBurned, [switch]$NextEndpoint, [switch]$AvoidBadFamily) {
+function Start-Slot([int]$n, [switch]$NewIdentity, [string]$PrevIp = '', [int]$WaitSec = 25, [switch]$AvoidBurned, [switch]$NextEndpoint, [switch]$AvoidBadFamily, [string[]]$AvoidFamilies = @()) {
   $s = Get-Slot $n
   if (-not (Test-SlotPortInRange ([int]$s.port))) { $s.port = SlotPort $n }
   # One wireproxy per slot: any process still serving this slot is stopped first, so a restart,
@@ -980,7 +1046,7 @@ function Start-Slot([int]$n, [switch]$NewIdentity, [string]$PrevIp = '', [int]$W
     Write-Event 'slot-error' @{ slot = $n; error = $_.Exception.Message }
     return @{ ok = $false; reason = $_.Exception.Message; slot = $n; ip = '' }
   }
-  $m = Wait-SlotHealthy $n $WaitSec $avoid -AvoidBadFamily:$AvoidBadFamily
+  $m = Wait-SlotHealthy $n $WaitSec $avoid -AvoidBadFamily:$AvoidBadFamily -AvoidFamilies $AvoidFamilies
   if (-not $m.ok) {
     Stop-SlotProcess $n | Out-Null
     return @{ ok = $false; reason = $m.reason; slot = $n; ip = '' }
@@ -1012,7 +1078,7 @@ function Add-Burned($s, [string]$ip) {
   }
   $s.burned = $arr
 }
-function Rotate-Slot([int]$n, [switch]$ForceIdentity, [int]$MaxIdentity = 2, [int]$WaitSec = 20) {
+function Rotate-Slot([int]$n, [switch]$ForceIdentity, [int]$MaxIdentity = 2, [int]$WaitSec = 20, [string[]]$AvoidFamilies = @()) {
   $s = Get-Slot $n
   $oldIp = [string]$s.ip
   # How long the old exit served, measured before the rotation itself takes any time.
@@ -1031,13 +1097,13 @@ function Rotate-Slot([int]$n, [switch]$ForceIdentity, [int]$MaxIdentity = 2, [in
   # in burned[] or from a burned family escalates to a new identity. Start-Slot stops the old wireproxy.
   if (-not $ForceIdentity) {
     for ($i = 1; $i -le 4; $i++) {
-      $r = Start-Slot $n -PrevIp $oldIp -WaitSec $WaitSec -AvoidBurned -AvoidBadFamily -NextEndpoint:($i -ge 2)
+      $r = Start-Slot $n -PrevIp $oldIp -WaitSec $WaitSec -AvoidBurned -AvoidBadFamily -NextEndpoint:($i -ge 2) -AvoidFamilies $AvoidFamilies
       if ($r.ok) { $lastIp = [string]$r.ip; $success = $true; break }
     }
   }
   if (-not $success -and -not $manual) {
     for ($i = 1; $i -le $MaxIdentity; $i++) {
-      $r = Start-Slot $n -NewIdentity -PrevIp $oldIp -WaitSec 25 -AvoidBurned -AvoidBadFamily -NextEndpoint
+      $r = Start-Slot $n -NewIdentity -PrevIp $oldIp -WaitSec 25 -AvoidBurned -AvoidBadFamily -NextEndpoint -AvoidFamilies $AvoidFamilies
       if ($r.ok) { $lastIp = [string]$r.ip; $success = $true; break }
     }
   }
@@ -1163,10 +1229,12 @@ function Invoke-UpLocked {
   }
   Write-UpProgress $Count $Count 'dedupe'
   for ($t = 1; $t -le [Math]::Max(1, $DedupeTries); $t++) {
-    $ips = @(Get-AllSlots | Where-Object { [int]$_.slot -le $Count -and $_.health -eq 'up' -and $_.ip } | ForEach-Object { UniqKey ([string]$_.ip) })
+    $ips = @(Get-AllSlots | Where-Object { [int]$_.slot -le $Count -and $_.health -eq 'up' -and $_.ip } | ForEach-Object { DedupeKey ([string]$_.ip) })
     if ($ips.Count -eq @($ips | Sort-Object -Unique).Count) { break }
     Invoke-DaemonDedupe
   }
+  Write-UpProgress $Count $Count 'burned families'
+  Invoke-ReplaceBurned
   Invoke-RetireExtra $Count
   Write-UpProgress $Count $Count 'done'
   $slots = @(Get-AllSlots)
@@ -1439,6 +1507,7 @@ function Invoke-DaemonDedupe {
     if (-not $byIp.ContainsKey($key)) { $byIp[$key] = @() }
     $byIp[$key] += [int]$s.slot
   }
+  $rotated = @()
   foreach ($ip in @($byIp.Keys)) {
     $nums = @($byIp[$ip] | Sort-Object)
     if ($nums.Count -le 1) { continue }
@@ -1449,11 +1518,71 @@ function Invoke-DaemonDedupe {
       try {
         Write-Event 'collision' @{ slot = $n; ip = $ip; keeps = [int]$nums[0] }
         $r = Rotate-Slot $n -ForceIdentity -MaxIdentity 1 -WaitSec 25
+        $rotated += $n
         if (-not $r.ok) { Write-Event 'dedupe-failed' @{ slot = $n; ip = $ip } }
       } catch {
         Write-Event 'daemon-error' @{ slot = $n; error = $_.Exception.Message }
       } finally { $lk.Dispose() }
     }
+  }
+  if ($FamilyDedupe -ne 1) { return }
+  # Same family, different IP (v1.4): only a FREE duplicate moves (an instance in use keeps its
+  # exit), with a reconnect first (no new registration) and the 10 min per-slot cooldown.
+  $byFam = @{}
+  foreach ($s in @(Get-AllSlots | Sort-Object slot)) {
+    if ($Count -ge 1 -and [int]$s.slot -gt $Count) { continue }
+    if ($s.health -ne 'up' -or -not $s.ip -or $rotated -contains [int]$s.slot) { continue }
+    $key = DedupeKey ([string]$s.ip)
+    if (-not $byFam.ContainsKey($key)) { $byFam[$key] = @() }
+    $byFam[$key] += $s
+  }
+  foreach ($fam in @($byFam.Keys)) {
+    $group = @($byFam[$fam])
+    if ($group.Count -le 1) { continue }
+    # Keep an owned slot (or the lowest); move the free others.
+    $keep = @($group | Where-Object { (Test-OwnerAlive $_.owner) -eq $true } | Select-Object -First 1)
+    if (-not $keep) { $keep = @($group | Select-Object -First 1) }
+    foreach ($s in $group) {
+      $n = [int]$s.slot
+      if ($n -eq [int]$keep[0].slot) { continue }
+      if ((Test-OwnerAlive $s.owner) -eq $true) { continue }
+      if (-not (Test-SelfRotateDue $n)) { continue }
+      if (Test-Path -LiteralPath $stopFlag) { return }
+      $lk = Lock-Slot $n 2000
+      if (-not $lk) { continue }
+      try {
+        Write-Event 'family-collision' @{ slot = $n; family = $fam; keeps = [int]$keep[0].slot }
+        $r = Rotate-Slot $n -MaxIdentity 1 -WaitSec 20 -AvoidFamilies @(@($byFam.Keys) | Where-Object { $_ })
+        if (-not $r.ok) { Write-Event 'family-dedupe-failed' @{ slot = $n; family = $fam } }
+      } catch {
+        Write-Event 'daemon-error' @{ slot = $n; error = $_.Exception.Message }
+      } finally { $lk.Dispose() }
+    }
+  }
+}
+# v1.4: a FREE slot whose exit is in a burned family is rotated to a working family before a
+# window claims it. Measured 27/11: after a reboot all 4 slots came back on burned families
+# (36a8::39c, 243c::39c), so the first window was going to hit the limit in seconds.
+function Invoke-ReplaceBurned {
+  foreach ($s in @(Get-AllSlots | Sort-Object slot)) {
+    if (Test-Path -LiteralPath $stopFlag) { return }
+    $n = [int]$s.slot
+    if ($Count -ge 1 -and $n -gt $Count) { continue }
+    if ($s.health -ne 'up' -or -not $s.ip) { continue }
+    if ((Test-OwnerAlive $s.owner) -eq $true) { continue }
+    if (-not (Test-FamilyBad ([string]$s.ip))) { continue }
+    if (-not (Test-SelfRotateDue $n)) { continue }
+    $lk = Lock-Slot $n 2000
+    if (-not $lk) { continue }
+    try {
+      $fam = Get-Family ([string]$s.ip)
+      Write-Event 'burned-replace' @{ slot = $n; ip = [string]$s.ip; family = $fam }
+      $taken = @(Get-AllSlots | Where-Object { [int]$_.slot -ne $n -and $_.health -eq 'up' -and $_.ip } | ForEach-Object { DedupeKey ([string]$_.ip) })
+      $r = Rotate-Slot $n -MaxIdentity 2 -WaitSec 20 -AvoidFamilies $taken
+      if (-not $r.ok) { Write-Event 'burned-replace-failed' @{ slot = $n; family = $fam } }
+    } catch {
+      Write-Event 'daemon-error' @{ slot = $n; error = $_.Exception.Message }
+    } finally { $lk.Dispose() }
   }
 }
 function Invoke-Daemon {
@@ -1554,6 +1683,7 @@ function Invoke-Daemon {
           Write-Event 'daemon-error' @{ slot = $n; error = $_.Exception.Message }
         } finally { $lk.Dispose() }
       }
+      Invoke-ReplaceBurned
       Invoke-DaemonDedupe
       $slots = @(Get-AllSlots)
       Update-Uniqueness $slots
@@ -1726,14 +1856,14 @@ function Invoke-Stats {
   $quickTotal = @($rows | Where-Object { [int]$_.livedSec -ge 0 -and [int]$_.livedSec -lt $quick }).Count
   $sharedQuick = @($byPrefix | Where-Object { $_.QuickRepeats -ge 2 }).Count
   Write-Host ('exits left within ' + $quick + ' s: ' + $quickTotal + '   /64 with 2+ quick repeats: ' + $sharedQuick)
-  if ($sharedQuick -ge 2 -and $DedupePrefix -ne 64) { Write-Host 'hint: the limit seems to follow the /64; try WPOOL_DEDUPE_PREFIX=64' }
+  if ($sharedQuick -ge 2 -and $DedupePrefix -ne 64 -and $FamilyDedupe -ne 1) { Write-Host 'hint: the limit seems to follow the /64; try WPOOL_DEDUPE_PREFIX=64' }
   $fams = Read-Families
   if ($fams.Count) {
     Write-Host ''
-    Write-Host ('exit families (quick = limit back within ' + $FamQuickSec + ' s, good = lasted ' + $FamGoodSec + ' s+; burned = 2+ quick and no good in 2 h):')
+    Write-Host ('exit families (quick = limit back within ' + $FamQuickSec + ' s, good = lasted ' + $FamGoodSec + ' s+, last ' + $BurnedTtlHours + ' h; burned = 2+ quick and the last two were quick):')
     $frows = foreach ($k in @($fams.Keys | Sort-Object)) {
-      $c = Get-FamilyCounts $k
-      [pscustomobject]@{ Family = $k; Quick = $c.quick; GoodLast2h = $c.good; Burned = ($c.quick -ge 2 -and $c.good -eq 0) }
+      $c = Get-FamilyCounts $k $fams
+      [pscustomobject]@{ Family = $k; Quick = $c.quick; Good = $c.good; Burned = [bool]$c.burned }
     }
     $frows | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
   }
