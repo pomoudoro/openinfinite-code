@@ -18,7 +18,7 @@ Bateu o limite? O IP é trocado sozinho e o chat continua no mesmo ponto, sem vo
 ## 💡 Como funciona, em 30 segundos
 
 - O OpenCode tem modelos grátis, mas com um **limite de mensagens por IP**. Quando ele chega, aparece *"You've used today's free messages"*.
-- O OpenInfinite Code fica de olho nisso. Quando o limite chega, ele **troca o IP** (pelo Cloudflare WARP, de graça) e manda no **mesmo chat**: *"voltamos, pode continuar e retomar de onde parou"*.
+- O OpenInfinite Code fica de olho nisso. Quando o limite chega, ele **troca o IP** (pelo Cloudflare WARP, de graça) e o **mesmo chat continua sozinho**. No Desktop isso é invisível: a IA recebe uma instrução oculta para continuar de onde parou, e nenhuma mensagem aparece na conversa.
 - Só o OpenCode passa pelo IP trocado. O navegador e o resto do PC continuam na sua conexão normal.
 
 > [!NOTE]
@@ -71,10 +71,10 @@ Este projeto nasceu do [OpenCode Infinite](https://gitlab.com/jekooo/opencode-in
 | App com botões (Auto, Reset limit, Status, Stop) em vez de menu de terminal | ❌ | ✅ | **original** |
 | Funciona **sem o app Cloudflare WARP** instalado (WARP embutido) | ❌ | ✅ | **original** |
 | Linux e macOS | ❌ (só Windows) | ✅ | **original** |
-| Retomada invisível (sem mensagem no chat) | ❌ (manda "voltamos, pode continuar…") | ✅ | **original** |
+| Retomada invisível (sem mensagem no chat) | ✅ (no Desktop; no terminal ainda aparece) | ✅ | empate |
 | Mullvad, Windscribe e Route64 | ❌ | ✅ (no app) | **original** |
 | Provedores DeepAI e OmniRoute prontos | ❌ | ✅ | **original** |
-| Releases com `SHA256SUMS` para conferir o download | ❌ (clone ou ZIP do GitHub) | ✅ | **original** |
+| Releases com `SHA256SUMS` para conferir o download | ✅ | ✅ | empate |
 
 **Use este se:** você está no Windows, quer **mais de uma conversa ao mesmo tempo**, quer que a troca de IP **não caia de novo numa faixa ruim**, e prefere o OpenCode oficial com scripts que dá para ler.
 
@@ -102,11 +102,18 @@ O comando `opencode` (a versão de terminal) não precisa ser instalado à mão:
 
 **1. Baixe o projeto** (um dos dois):
 
-```powershell
-git clone https://github.com/pomoudoro/openinfinite-code.git
-```
+- **Versão estável (recomendado):** em [Releases](https://github.com/pomoudoro/openinfinite-code/releases/latest), baixe o `openinfinite-code-vX.Y.Z.zip` e extraia (por exemplo em `Documentos\openinfinite-code`). Para conferir que o arquivo veio inteiro e sem alteração:
 
-ou, sem Git: no GitHub, **Code → Download ZIP** e extraia a pasta (por exemplo em `Documentos\openinfinite-code`).
+  ```powershell
+  Get-FileHash .\openinfinite-code-v2.64.0.zip -Algorithm SHA256
+  ```
+
+  O resultado tem que ser igual à linha do ZIP no `SHA256SUMS` do mesmo release.
+- **Com Git** (versão em desenvolvimento, atualiza com `git pull`):
+
+  ```powershell
+  git clone https://github.com/pomoudoro/openinfinite-code.git
+  ```
 
 **2. Dê dois cliques em `INSTALAR.bat`.** Ele:
 - confere Python, WARP, OpenCode Desktop e Node.js, e oferece instalar o que faltar;
@@ -140,7 +147,7 @@ Instale o que faltar e rode o `INSTALAR.bat` de novo até aparecer "Pronto". Ele
 > [!TIP]
 > Use o **[2]** da tela inicial, não o [1] *opencode automático*: o [1] pula as escolhas e abre uma sessão nova, enquanto o [2] passa pela conexão e pega um IP novo antes de abrir o Desktop, que é o caminho testado com a retomada automática.
 
-Depois é só conversar. **Quando o limite chegar, você não precisa fazer nada:** o launcher troca o IP, confere que mudou e manda a mensagem de retomada no mesmo chat.
+Depois é só conversar. **Quando o limite chegar, você não precisa fazer nada:** o launcher troca o IP, confere que mudou e o mesmo chat continua. No Desktop a retomada é invisível; para ver uma mensagem no chat em vez disso, desligue **5. Definições → Sessão → Retomada invisível**.
 
 ---
 
@@ -179,7 +186,7 @@ cd openinfinite-code
 git pull
 ```
 
-Depois é só abrir o `INICIAR.bat` ou o `INICIAR-POOL.bat`: eles percebem que os arquivos mudaram e atualizam a cópia instalada sozinhos (inclusive as traduções). Quem baixou o ZIP baixa de novo e roda o `INSTALAR.bat`.
+Depois é só abrir o `INICIAR.bat` ou o `INICIAR-POOL.bat`: eles percebem que os arquivos mudaram e atualizam a cópia instalada sozinhos (inclusive as traduções). Quem usa o ZIP baixa o release novo, extrai por cima e roda o `INSTALAR.bat`.
 
 ---
 
@@ -218,6 +225,7 @@ Depois é só abrir o `INICIAR.bat` ou o `INICIAR-POOL.bat`: eles percebem que o
 
 - **Como o pool funciona por dentro**, comandos do `warp-pool.ps1` e testes manuais: [docs/pool.md](docs/pool.md)
 - **O que mudou em cada versão:** [CHANGELOG.md](CHANGELOG.md)
+- **Publicar uma versão:** atualize `VERSION` e o `CHANGELOG.md` (seção `## vX.Y.Z`), depois `git tag vX.Y.Z` e `git push origin vX.Y.Z`. O GitHub Actions roda os testes, monta o ZIP, gera o `SHA256SUMS` e publica o release.
 - **Testes automáticos** (sem túnel, sem rede): `powershell -NoProfile -ExecutionPolicy Bypass -File tests\run-tests.ps1`. O GitHub Actions roda os mesmos testes a cada push.
 - **Onde ficam os dados:** `%LOCALAPPDATA%\opencode-infinite\` (`config.json`, `launcher.log`, `pool\`, `backup\`).
 

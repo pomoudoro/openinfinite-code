@@ -224,6 +224,61 @@ Check '-Prune apaga a copia antiga do banco' (-not (Test-Path -LiteralPath (Join
 Check '-Prune mantem a copia mais nova' (Test-Path -LiteralPath (Join-Path $State 'backup\db-new\opencode.db'))
 $Prune = [switch]$false
 
+# ---- 11. hidden resume ------------------------------------------------------------------------
+Write-Host 'retomada invisivel'
+$env:OC_RESUME_LIB_ONLY = '1'
+. (Join-Path $repo 'launcher\desktop-resume.ps1')
+$env:OC_RESUME_LIB_ONLY = ''
+$ht = Get-HiddenResumeText
+Check 'texto oculto em portugues com acento certo' ($ht -like '*j' + [char]0xE1 + ' foi feito.') $ht
+$sb = Get-SyntheticBody $ht | ConvertFrom-Json
+Check 'corpo sintetico sem description (description faz o Desktop mostrar)' (-not $sb.PSObject.Properties['description'])
+Check 'corpo sintetico com texto e metadata' ($sb.text -eq $ht -and $sb.metadata.source -eq 'openinfinite')
+$env:OC_RESUME_HIDDEN_TEXT = 'texto proprio'
+Check 'OC_RESUME_HIDDEN_TEXT troca o texto' ((Get-HiddenResumeText) -eq 'texto proprio')
+$env:OC_RESUME_HIDDEN_TEXT = ''
+foreach ($f in @('desktop-resume.ps1', 'resume-runner.ps1', 'warp-pool.ps1')) {
+  $n = @([IO.File]::ReadAllText((Join-Path $repo ('launcher\' + $f))).ToCharArray() | Where-Object { [int]$_ -gt 127 }).Count
+  Check ($f + ' so tem ASCII') ($n -eq 0) ("$n caracteres")
+}
+$launcherText = [IO.File]::ReadAllText($bat)
+Check 'launcher tem a opcao RESUME_HIDDEN (padrao, validacao, Definicoes)' (([regex]::Matches($launcherText, 'RESUME_HIDDEN')).Count -ge 6)
+Check 'launcher so esconde no modo continue' ($launcherText -match 'if "%RESUME_HIDDEN%"=="1" if /i not "%RESUME_MODE%"=="last" if /i not "%RESUME_MODE%"=="custom" set "OC_RESUME_HIDDEN=1"')
+
+# resume-target.py check: a hidden resume waiting in session_inbox, or already a synthetic message,
+# counts as sent; a plain user message still counts; other text does not.
+$py = (Get-Command python -ErrorAction SilentlyContinue).Source
+if ($py) {
+  $dd = Join-Path $st 'ocdata'
+  New-Item -ItemType Directory -Force -Path $dd | Out-Null
+  $mk = @'
+import sqlite3, sys
+con = sqlite3.connect(sys.argv[1])
+con.execute("create table session_message (id text, session_id text, type text, data text, time_created integer)")
+con.execute("create table session_inbox (id text, session_id text, type text, payload text, delivery text, enqueued_seq integer, time_created integer)")
+con.execute("insert into session_message values ('m1','ses_a','idle','{\"error\":\"Free usage limit reached\"}',1000)")
+con.execute("insert into session_inbox values ('m2','ses_a','synthetic','{\"text\":\"O limite gratuito foi atingido e o IP foi trocado. Continue\"}','queue',1,2000)")
+con.execute("insert into session_message values ('m3','ses_b','synthetic','{\"text\":\"O limite gratuito foi atingido e o IP foi trocado. Continue\"}',3000)")
+con.execute("insert into session_message values ('m4','ses_c','user','{\"text\":\"voltamos, pode continuar\"}',4000)")
+con.commit()
+'@
+  $mkPath = Join-Path $st 'mk.py'
+  [IO.File]::WriteAllText($mkPath, $mk)
+  & $py -I $mkPath (Join-Path $dd 'opencode.db')
+  $env:OC_DATA_DIR = $dd
+  $rt = Join-Path $repo 'launcher\resume-target.py'
+  $q = 'O limite gratuito foi atingido e o IP foi trocado. Continue'
+  $a = (& $py -I $rt check --session ses_a --since-ms 0 --text $q) | ConvertFrom-Json
+  $b = (& $py -I $rt check --session ses_b --since-ms 0 --text $q) | ConvertFrom-Json
+  $c = (& $py -I $rt check --session ses_c --since-ms 0 --text 'voltamos, pode continuar') | ConvertFrom-Json
+  $d = (& $py -I $rt check --session ses_a --since-ms 0 --text 'outra coisa') | ConvertFrom-Json
+  $env:OC_DATA_DIR = ''
+  Check 'retomada oculta na fila conta como enviada' ([bool]$a.already_sent)
+  Check 'retomada oculta ja no chat conta como enviada' ([bool]$b.already_sent)
+  Check 'mensagem normal continua contando' ([bool]$c.already_sent)
+  Check 'outro texto nao conta' (-not [bool]$d.already_sent)
+} else { Write-Host '  (python ausente: checagem do resume-target.py pulada)' }
+
 Remove-Item -LiteralPath $st -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ''
 Write-Host ('passaram: ' + $script:passes + '   falharam: ' + $script:fails)

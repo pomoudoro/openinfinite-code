@@ -121,12 +121,26 @@ def last_free_limit_ms(con, sid, since_ms):
 def cmd_check(con, a):
     ref = last_free_limit_ms(con, a.session, a.since_ms)
     needle = "%" + a.text[:60].replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    # openinfinite-code: the hidden resume is a synthetic message; until the turn runs it waits
+    # in session_inbox (payload), afterwards it is a session_message of type synthetic.
     row = con.execute(
-        "select count(*), max(time_created) from session_message where session_id=? and type='user' "
+        "select count(*), max(time_created) from session_message where session_id=? and type in ('user', 'synthetic') "
         "and time_created>? and data like ? escape '\\'",
         (a.session, ref, needle),
     ).fetchone()
-    return {"session": a.session, "after_ms": ref, "already_sent": bool(row[0]), "sent_ms": row[1]}
+    count, sent = row[0], row[1]
+    try:
+        inbox = con.execute(
+            "select count(*), max(time_created) from session_inbox where session_id=? and type in ('user', 'synthetic') "
+            "and time_created>? and payload like ? escape '\\'",
+            (a.session, ref, needle),
+        ).fetchone()
+        if inbox and inbox[0]:
+            count += inbox[0]
+            sent = max(sent or 0, inbox[1] or 0)
+    except sqlite3.Error:
+        pass  # older OpenCode without session_inbox
+    return {"session": a.session, "after_ms": ref, "already_sent": bool(count), "sent_ms": sent}
 
 
 def cmd_status(con, a):

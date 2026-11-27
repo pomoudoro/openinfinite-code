@@ -2,6 +2,16 @@
 
 O que mudou em cada versão do launcher e do `warp-pool.ps1`, da mais nova para a mais antiga.
 
+## v2.64.0
+
+Primeira versão publicada como release, com `SHA256SUMS`. Reúne tudo desde a 2.63.1:
+
+- **Retomada invisível no Desktop:** depois da troca de IP, a IA recebe uma instrução oculta (mensagem *synthetic* do OpenCode oficial, sem `description`, que o Desktop não mostra) e continua de onde parou. Sem rota sintética, volta sozinho para a mensagem normal. Opção *Retomada invisível* em Definições → Sessão (ligada); vale com o modo de retomada *continue*. A checagem de envio repetido também enxerga a mensagem oculta.
+- **Releases com `SHA256SUMS`:** ZIP versionado e checksums publicados pelo GitHub Actions a cada tag `v*`.
+- **Pool de túneis:** família de IP estreita, troca de túnel em faixa queimada, um túnel por família, troca instantânea, melhor família primeiro, painel com gráficos, `stats` por túnel, `tidy`, logs com limite (`warp-pool.ps1` 1.4 a 1.8).
+- **Uso:** `INICIAR-POOL.bat` e `--pool`, instalador que liga o pool, README para o usuário, comparação com o original, traduções sincronizadas pelo `INICIAR.bat`.
+- **Qualidade:** testes automáticos e GitHub Actions.
+
 ## warp-pool.ps1 1.8
 - **Gráficos no painel:** cada troca dos últimos 7 dias (quanto o IP antigo durou; vermelho = limite em menos de 2 min, verde = 5 min ou mais, quadrado = troca instantânea) e a duração mediana por família. SVG dentro da página, sem biblioteca, segue o tema claro/escuro.
 - **`stats`** começa pela tabela dos túneis de agora com família, nota e queimada.
