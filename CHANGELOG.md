@@ -2,6 +2,10 @@
 
 O que mudou em cada versão do launcher e do `warp-pool.ps1`, da mais nova para a mais antiga.
 
+## Em desenvolvimento
+
+- **Retomada invisível nas janelas de terminal:** em vez de `opencode run` (que grava uma mensagem de usuário), o `resume-runner.ps1` sobe um servidor privado (`opencode serve`, com o proxy do túnel e senha gerada na hora), troca o modelo da conversa se for preciso, manda a retomada como mensagem *synthetic*, aprova permissões sozinho quando o `--auto` está ligado, espera a resposta terminar e encerra o servidor. Testado no OpenCode 2.3.2: a resposta termina em ~2 s e nenhuma mensagem de usuário fica no chat. Se o servidor não subir ou a conversa não existir, volta para o `opencode run` visível sem mandar nada antes.
+
 ## v2.64.0
 
 Primeira versão publicada como release, com `SHA256SUMS`. Reúne tudo desde a 2.63.1:
