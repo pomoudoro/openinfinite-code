@@ -238,6 +238,34 @@ if (Test-Path -LiteralPath $patPath) {
 Info "modelo da retomada : $DefaultModel"
 Info "mensagem de retomada: $ResumeMsg"
 
+# Pool de tuneis: varias conversas ao mesmo tempo, cada uma com o proprio IP, e troca mais rapida
+# no limite. Ligar aqui evita o passo manual em Definicoes (4 opcoes) que o usuario novo nao achava.
+$poolOn = $false
+$cfgNow = $null
+try { $cfgNow = Le-Json $cfgPath } catch { $cfgNow = $null }
+if ($cfgNow -and $cfgNow.PSObject.Properties['settings'] -and $cfgNow.settings.PSObject.Properties['WPOOL_ENABLE'] -and [string]$cfgNow.settings.WPOOL_ENABLE -eq '1') {
+    $poolOn = $true
+    Ok 'pool de tuneis: ja estava ligado'
+} elseif ($cfgNow) {
+    Info ''
+    Info 'Pool de tuneis: cada conversa sai por um IP proprio, e quando o limite chega'
+    Info 'a troca e mais rapida. Nao precisa instalar nada a mais: na primeira vez ele'
+    Info 'baixa sozinho o wgcf e o wireproxy (com conferencia de assinatura) e leva ~2 min.'
+    if (Pergunta 'Ligar o pool de tuneis? (recomendado)') {
+        $set = [ordered]@{ WPOOL_ENABLE = 1; MULTI_INSTANCE = 1; OC_EGRESS_DEFAULT = 'WIREGUARD' }
+        if (-not $cfgNow.settings.PSObject.Properties['WPOOL_COUNT']) { $set['WPOOL_COUNT'] = 4 }
+        foreach ($k in $set.Keys) {
+            if ($cfgNow.settings.PSObject.Properties[$k]) { $cfgNow.settings.$k = $set[$k] }
+            else { $cfgNow.settings | Add-Member -NotePropertyName $k -NotePropertyValue $set[$k] }
+        }
+        Grava-Json $cfgNow $cfgPath
+        $poolOn = $true
+        Ok 'pool de tuneis ligado (4 tuneis, varias janelas)'
+    } else {
+        Info 'pool desligado: voce usa o WARP (caminho 2-1-1). Para ligar depois, rode o INSTALAR.bat de novo.'
+    }
+}
+
 # ------------------------------------------------------------------ 4. modelo padrao do OpenCode
 Titulo '4/6  Modelo padrao do OpenCode'
 New-Item -ItemType Directory -Force -Path $OcCfgDir | Out-Null
@@ -308,7 +336,14 @@ if ($Faltando.Count) {
 } else {
     Titulo 'Pronto'
 }
-Info 'Para usar: de dois cliques em INICIAR.bat e siga 2 - 1 - 1 (Launch OpenCode, WARP, New IP).'
+if ($poolOn) {
+    Info 'Para usar: dois cliques em INICIAR-POOL.bat (abre direto, sem menus).'
+    Info '           ou INICIAR.bat e siga 2 - 5 - 1 (Iniciar o OpenCode, WIREGUARD = pool, Nova IP).'
+    Info 'Outra conversa ao mesmo tempo: abra o INICIAR-POOL.bat de novo.'
+} else {
+    Info 'Para usar: dois cliques em INICIAR.bat e siga 2 - 1 - 1 (Iniciar o OpenCode, WARP, Nova IP).'
+}
+if (Tem-Warp) { Info 'Primeira vez com o WARP: abra o app Cloudflare WARP uma vez e aceite os termos.' }
 Info 'Na primeira execucao o launcher faz o setup dele (atalhos, comando opencodeinf).'
 Write-Host ''
 exit 0
