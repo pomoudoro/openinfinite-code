@@ -23,6 +23,9 @@ if /i "%OP%"=="claim" goto :do_claim
 if /i "%OP%"=="release" goto :do_release
 if /i "%OP%"=="ver" goto :do_logs
 if /i "%OP%"=="logs" goto :do_logs
+if /i "%OP%"=="stats" goto :do_stats
+if /i "%OP%"=="painel" goto :do_painel
+if /i "%OP%"=="dashboard" goto :do_painel
 if /i "%OP%"=="-h" goto :help
 if /i "%OP%"=="/?" goto :help
 echo Comando desconhecido: %OP%
@@ -39,6 +42,8 @@ echo   4 - rotate ^<n^> (troca o IP do slot n)
 echo   5 - claim ^<instancia^> (reserva um slot)
 echo   6 - release ^<instancia^> (libera o slot)
 echo   7 - ver logs (status e eventos)
+echo   8 - stats (familias de IP boas e queimadas, duracao dos IPs)
+echo   9 - painel (abre no navegador: tuneis, familias, trocas)
 echo   0 - sair
 set "OP="
 set /p "OP=Escolha: "
@@ -50,11 +55,13 @@ if "%OP%"=="4" goto :do_rotate
 if "%OP%"=="5" goto :do_claim
 if "%OP%"=="6" goto :do_release
 if "%OP%"=="7" goto :do_logs
+if "%OP%"=="8" goto :do_stats
+if "%OP%"=="9" goto :do_painel
 if "%OP%"=="0" exit /b 0
 goto :menu
 
 :help
-echo Uso: POOL.bat ^<status^|up^|down^|rotate n^|claim instancia^|release instancia^|ver logs^>
+echo Uso: POOL.bat ^<status^|up^|down^|rotate n^|claim instancia^|release instancia^|ver logs^|stats^|painel^>
 exit /b 0
 
 :sem_pool
@@ -114,6 +121,15 @@ if exist "%STATE%\pool\pool-status.json" (
 if exist "%STATE%\recovery-events.jsonl" (
   %PS% -Command "Get-Content -LiteralPath '%STATE%\recovery-events.jsonl' -Tail 15"
 )
+goto :fim
+
+:do_stats
+%PS% -File "%POOLPS%" -Action stats -State "%STATE%"
+goto :fim
+
+REM O vigia regrava o painel a cada ciclo e a pagina recarrega sozinha a cada 30 s.
+:do_painel
+%PS% -File "%POOLPS%" -Action dashboard -State "%STATE%"
 goto :fim
 
 :fim

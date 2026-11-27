@@ -1043,6 +1043,8 @@ REM v3.7: --warp, --tor and --proxy are the same as the direct commands opencode
 if /i "%~1"=="--warp" (set "PRESET_MODE=1" & set "PRESET_NAME=warp" & set "OPT_HERE=1" & set "OPT_SAMEIP=1" & set "OPT_QUIET=1" & shift & goto :ps_args)
 if /i "%~1"=="--tor" (set "PRESET_MODE=1" & set "PRESET_NAME=tor" & set "OPT_HERE=1" & set "OPT_SAMEIP=1" & set "OPT_QUIET=1" & shift & goto :ps_args)
 if /i "%~1"=="--proxy" (set "PRESET_MODE=1" & set "PRESET_NAME=proxy" & set "OPT_HERE=1" & set "OPT_SAMEIP=1" & set "OPT_QUIET=1" & shift & goto :ps_args)
+REM openinfinite-code: --pool = menu path 2-5-1 (WIREGUARD through the WARP egress pool) with no screens. INICIAR-POOL.bat uses it.
+if /i "%~1"=="--pool" (set "PRESET_MODE=1" & set "PRESET_NAME=pool" & set "OPT_HERE=1" & set "OPT_NEWIP=1" & shift & goto :ps_args)
 goto :ps_parsed
 :ps_name
 set "PRESET_MODE=1"
@@ -1088,9 +1090,20 @@ if /i "%PRESET_NAME%"=="tor" set "EGRESS=TOR"
 if /i "%PRESET_NAME%"=="tor" goto :ps_have
 if /i "%PRESET_NAME%"=="proxy" set "EGRESS=PROXY"
 if /i "%PRESET_NAME%"=="proxy" goto :ps_have
+if /i "%PRESET_NAME%"=="pool" goto :ps_pool
 :ps_bad
-echo opencode-preset: unknown preset "%PRESET_NAME%" (warp, tor, proxy) - code 2
+echo opencode-preset: unknown preset "%PRESET_NAME%" (warp, tor, proxy, pool) - code 2
 exit /b 2
+REM The pool preset needs the pool on: without it WIREGUARD means .conf files and ends in "continue direct?".
+:ps_pool
+if /i not "%WPOOL_ENABLE%"=="1" (
+  echo O pool de tuneis esta desligado. Ligue em Definicoes - Pool de tuneis - Usar o pool de tuneis,
+  echo ou abra pelo INICIAR.bat normal. - code 2
+  pause
+  exit /b 2
+)
+set "EGRESS=WIREGUARD"
+goto :ps_have
 :ps_have
 set "OC_EGRESS_DEFAULT=%EGRESS%"
 set "OPFOLDER=%CD%"
