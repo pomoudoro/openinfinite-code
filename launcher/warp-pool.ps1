@@ -25,6 +25,8 @@ param(
   # parent of this PowerShell, which is the caller when it runs the script directly.
   [int]$OwnerPid = 0,
   [switch]$Force,
+  # rotate: try the fast swap to a free verified slot first (v1.5; needs -Instance and Reason quota/watcher).
+  [switch]$Swap,
   [switch]$AllowWarpTunnel,
   [string]$State = ($env:LOCALAPPDATA + '\opencode-infinite'),
   [int]$PortBase = 0,
@@ -50,7 +52,7 @@ $PeerEndpoint = '162.159.192.1:2408'
 # answered on all of these; 162.159.193.1:2408 did not. A rebuilt slot moves to the next one, so
 # an endpoint that stopped answering the slot's handshakes is not retried in a loop.
 $PeerEndpoints = @('162.159.192.1:2408', '188.114.97.1:2408', '162.159.195.1:2408', '162.159.192.1:4500', '188.114.96.1:500')
-$ScriptVersion = '1.4'
+$ScriptVersion = '1.5'
 
 $SelfPath = $MyInvocation.MyCommand.Path
 $State = [IO.Path]::GetFullPath($State)
@@ -471,6 +473,15 @@ function Test-FamilyBad([string]$ip) {
   if (-not $fam) { return $false }
   return [bool](Get-FamilyCounts $fam).burned
 }
+# v1.5: how well a family has done within the TTL: +1 per exit that lasted, -1 per quick limit,
+# with the newest outcome counted twice. Unknown families score 0, between good and bad ones.
+function Get-FamilyScore([string]$ip, $all = $null) {
+  $o = @(Get-FamilyOutcomes (Get-Family $ip) $all)
+  $score = 0
+  foreach ($x in $o) { if ($x.k -eq 'good') { $score++ } else { $score-- } }
+  if ($o.Count) { if ($o[-1].k -eq 'good') { $score++ } else { $score-- } }
+  return $score
+}
 function Add-FamilyOutcome([string]$ip, [string]$kind) {
   $fam = Get-Family $ip
   if (-not $fam -or ($kind -ne 'quick' -and $kind -ne 'good')) { return }
@@ -500,6 +511,8 @@ function UniqKey([string]$ip) {
 # as the same exit, so 4 tunnels are 4 different ranges and not 2 ranges twice. Only used to
 # rotate free duplicates; Update-Uniqueness (which marks 'degraded') keeps the strict key.
 $FamilyDedupe = EnvOrCfgInt 'WPOOL_FAMILY_DEDUPE' 1
+# v1.5: 1 (default) = a window that hits the limit moves to a free verified slot at once (-Swap).
+$FastSwap = EnvOrCfgInt 'WPOOL_FAST_SWAP' 1
 function DedupeKey([string]$ip) {
   if ($FamilyDedupe -eq 1) { $f = Get-Family $ip; if ($f) { return $f } }
   return (UniqKey $ip)
@@ -1285,13 +1298,18 @@ function Invoke-Claim {
   $existing = Read-Json $claimPath
   $order = @()
   if ($existing -and $existing.slot) { $order += [int]$existing.slot }
-  # Free slots whose exit is in a burned family go last: a new window starts on an exit that works.
+  # Free slots whose exit is in a burned family (or still in the slot's own burned[], left by a
+  # swap) go last; the others go best family first (v1.5): a new window starts on an exit that works.
   $good = @(); $bad = @()
+  $famAll = Read-Families
   foreach ($n in $nums) {
     if ($order -contains $n) { continue }
-    if (Test-FamilyBad ([string](Get-Slot $n).ip)) { $bad += $n } else { $good += $n }
+    $sn = Get-Slot $n
+    $ipn = [string]$sn.ip
+    if ((Test-FamilyBad $ipn) -or ($ipn -and @(Get-BurnedIps $sn) -contains $ipn)) { $bad += $n }
+    else { $good += [pscustomobject]@{ n = $n; score = (Get-FamilyScore $ipn $famAll) } }
   }
-  $order += $good + $bad
+  $order += @($good | Sort-Object @{ Expression = 'score'; Descending = $true }, n | ForEach-Object { [int]$_.n }) + $bad
   $end = (Get-Date).AddSeconds(10)
   foreach ($n in $order) {
     $remaining = [int][Math]::Max(0, ($end - (Get-Date)).TotalMilliseconds)
@@ -1383,10 +1401,96 @@ function Invoke-Release {
   Write-Host ('released ' + $Instance)
   return 0
 }
+# v1.5 fast swap: when the free limit comes back (Reason quota/watcher) and the window passes -Swap
+# and -Instance, its claim moves at once to a FREE slot that is already up and verified, in a
+# working family different from the burned one. No reconnect, no registration: the window gets a new
+# exit in about a second instead of 10-60 s. The old slot is left free with its exit in burned[];
+# the daemon rotates it in the background (Invoke-ReplaceBurned) before anyone claims it again.
+# Returns the new slot number, or 0 when no spare fits (the caller rotates in place as before).
+function Invoke-SwapToSpare([int]$from) {
+  if (-not $Swap -or -not $Instance -or $FastSwap -ne 1) { return 0 }
+  if (@('quota', 'watcher') -notcontains $Reason.ToLowerInvariant()) { return 0 }
+  $claimPath = Join-Path $claimsDir ($Instance + '.json')
+  $claim = Read-Json $claimPath
+  if (-not $claim -or [int]$claim.slot -ne $from) { return 0 }
+  $src = Get-Slot $from
+  $oldIp = [string]$src.ip
+  $oldFam = Get-Family $oldIp
+  $all = Read-Families
+  $cands = @()
+  foreach ($n in @(Get-SlotNumbers)) {
+    if ($n -eq $from -or ($Count -ge 1 -and $n -gt $Count)) { continue }
+    $s = Get-Slot $n
+    if ($s.health -ne 'up' -or -not $s.ip) { continue }
+    if ($s.owner -and (Test-OwnerAlive $s.owner) -ne $false) { continue }
+    $ip = [string]$s.ip
+    if ((Get-Family $ip) -eq $oldFam) { continue }
+    if (Test-FamilyBad $ip) { continue }
+    if (@(Get-BurnedIps $s) -contains $ip) { continue }
+    $cands += [pscustomobject]@{ n = $n; score = (Get-FamilyScore $ip $all) }
+  }
+  foreach ($c in @($cands | Sort-Object @{ Expression = 'score'; Descending = $true }, n)) {
+    $n = [int]$c.n
+    $lk = Lock-Slot $n 2000
+    if (-not $lk) { continue }
+    try {
+      $s = Get-Slot $n
+      if ($s.owner -and (Test-OwnerAlive $s.owner) -ne $false) { continue }
+      if (-not (Test-SlotProcess $s)) { continue }
+      $m = Measure-Slot $s 6
+      if (-not $m.ok -or (Get-Family ([string]$m.trace.ip)) -eq $oldFam -or (Test-FamilyBad ([string]$m.trace.ip))) { continue }
+      # The old exit: same bookkeeping as Rotate-Slot (family outcome, burned[], history line).
+      $lived = -1
+      if ($src.PSObject.Properties['ipSince'] -and $src.ipSince) { try { $lived = [int]((Get-Date) - [DateTime]::Parse([string]$src.ipSince)).TotalSeconds } catch { } }
+      if ($oldIp -and $lived -ge 0) {
+        if ($lived -lt $FamQuickSec) { Add-FamilyOutcome $oldIp 'quick' }
+        elseif ($lived -ge $FamGoodSec) { Add-FamilyOutcome $oldIp 'good' }
+      }
+      $now = (Get-Date).ToString('o')
+      $owner = $src.owner
+      if (-not $owner) { $owner = $claim.owner }
+      $s.ip = [string]$m.trace.ip; $s.colo = [string]$m.trace.colo; $s.warp = [string]$m.trace.warp
+      $s.health = 'up'; $s.verifiedAt = $now; $s.owner = $owner
+      if ($s.PSObject.Properties['ipSince']) { $s.ipSince = $now } else { $s | Add-Member -NotePropertyName ipSince -NotePropertyValue $now }
+      Save-Slot $s
+      $src = Get-Slot $from
+      if ($oldIp) { Add-Burned $src $oldIp }
+      $src.owner = $null
+      Save-Slot $src
+      $claim2 = [ordered]@{
+        instance = $Instance; slot = $n; port = [int]$s.port; proxy = ('http://127.0.0.1:' + $s.port);
+        ip = [string]$s.ip; at = [string]$claim.at; renewedAt = $now; owner = $owner
+      }
+      Write-Json $claimPath $claim2
+      Write-Json (Instance-EgressPath $Instance) ([ordered]@{ slot = $n; port = [int]$s.port; proxy = ('http://127.0.0.1:' + $s.port); ip = [string]$s.ip; colo = [string]$s.colo })
+      try {
+        $line = ConvertTo-Json -Compress -InputObject ([ordered]@{
+          at = $now; slot = $from; owner = $Instance; ok = $true; swap = $n;
+          before = $oldIp; beforePrefix = (Get-Prefix64 $oldIp); after = [string]$s.ip; afterPrefix = (Get-Prefix64 ([string]$s.ip));
+          livedSec = $lived; endpoint = [string]$src.endpoint; reason = $Reason;
+          beforeFamily = $oldFam; afterFamily = (Get-Family ([string]$s.ip)) })
+        [IO.File]::AppendAllText((Join-Path $poolDir 'rotation-history.jsonl'), $line + "`r`n", (New-Object Text.UTF8Encoding($false)))
+      } catch { }
+      Write-Event 'swap' @{ instance = $Instance; from = $from; to = $n; before = $oldIp; after = [string]$s.ip; lived = $lived }
+      Write-Host ('swapped ' + $Instance + ' from slot ' + $from + ' to slot ' + $n + ' port ' + $s.port + ' ip ' + $s.ip)
+      return $n
+    } finally { $lk.Dispose() }
+  }
+  return 0
+}
 function Invoke-Rotate {
   Ensure-Dirs
   if ($Slot -le 0) { Write-Host 'rotate requires -Slot'; return 1 }
   if (-not (Test-Path -LiteralPath (SlotJsonPath $Slot))) { Write-Host ('slot ' + $Slot + ' not found'); return 3 }
+  $swapped = 0
+  $lk0 = Lock-Slot $Slot 10000
+  if ($lk0) { try { $swapped = Invoke-SwapToSpare $Slot } finally { $lk0.Dispose() } }
+  if ($swapped -gt 0) {
+    $slots = @(Get-AllSlots)
+    Write-PoolStatus $slots
+    Show-Table $slots
+    return 0
+  }
   # Same slot lock as claim/release: concurrent rotators (launcher + dispatcher) would
   # otherwise spawn two wireproxies on one port. Never hold it past this call.
   $lock = Lock-Slot $Slot 10000
@@ -1570,7 +1674,10 @@ function Invoke-ReplaceBurned {
     if ($Count -ge 1 -and $n -gt $Count) { continue }
     if ($s.health -ne 'up' -or -not $s.ip) { continue }
     if ((Test-OwnerAlive $s.owner) -eq $true) { continue }
-    if (-not (Test-FamilyBad ([string]$s.ip))) { continue }
+    $selfBurned = (@(Get-BurnedIps $s) -contains [string]$s.ip)
+    if (-not $selfBurned -and -not (Test-FamilyBad ([string]$s.ip))) { continue }
+    # A slot left behind by a swap (its exit in its own burned[]) is due at once (no earlier try);
+    # a failed rotation keeps the stale exit, so the 10 min cooldown applies to both cases.
     if (-not (Test-SelfRotateDue $n)) { continue }
     $lk = Lock-Slot $n 2000
     if (-not $lk) { continue }

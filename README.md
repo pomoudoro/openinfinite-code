@@ -28,17 +28,19 @@ ou, sem Git: no GitHub, **Code → Download ZIP** e extraia a pasta (por exemplo
 
 **2. Dê dois cliques em `INSTALAR.bat`.** Ele confere o que falta (Python, WARP, OpenCode Desktop, Node.js) e oferece instalar. No fim aparece **"Pronto"** ou a lista do que ainda falta, com os links. Instale o que faltar e rode o `INSTALAR.bat` de novo até aparecer "Pronto".
 
-**3. Dê dois cliques em `INICIAR.bat`** e siga o caminho **2 → 1 → 1**:
+**3. Dê dois cliques em `INICIAR.bat`** e siga o caminho **2 → 5 → 1** (com o pool ligado, veja abaixo) ou **2 → 1 → 1** (WARP simples):
 
 > [!TIP]
-> ### ✅ Caminho recomendado: `2 - 1 - 1`
+> ### ✅ Caminho recomendado: `2 - 5 - 1` (pool de túneis)
 > | Tela | Escolha |
 > |---|---|
 > | Início | **[2] Iniciar o OpenCode** |
-> | Conexão | **[1] WARP** |
+> | Conexão | **[5] WIREGUARD** (pool de túneis) |
 > | Menu | **[1] Nova IP e iniciar o OpenCode** |
 >
-> Use **2-1-1** e não 1-1-1. O `[1] opencode automático` da tela inicial pula tudo e abre uma sessão nova; o `[2]` passa pela escolha da conexão e pega um IP novo antes de abrir o OpenCode Desktop, que é o caminho testado com a retomada automática.
+> É o caminho que aproveita tudo: túneis prontos com IPs de faixas boas, troca instantânea quando o limite chega e várias janelas com IP próprio. Ligue o pool uma vez em **Definições** ([próxima seção](#-várias-janelas-cada-uma-com-o-próprio-ip-pool-de-túneis)).
+> Sem o pool, use **2 - 1 - 1** (*[1] WARP*): um IP para o PC inteiro.
+> Use **2-…** e não 1-1-1. O `[1] opencode automático` da tela inicial pula tudo e abre uma sessão nova; o `[2]` passa pela escolha da conexão e pega um IP novo antes de abrir o OpenCode Desktop, que é o caminho testado com a retomada automática.
 > O modo Desktop já vem salvo pelo instalador, por isso não aparece tela de modo nem de pasta (o próprio Desktop escolhe o projeto). Se o Desktop não estiver instalado, aparece a tela de modo antes da conexão.
 
 ---
@@ -62,10 +64,11 @@ Feche e abra o `INICIAR.bat` de novo. Na primeira vez ele leva até ~2 minutos c
 
 | Situação | O que acontece |
 |---|---|
-| Uma janela bate o limite grátis | Só o túnel dela troca de IP e o chat continua sozinho. |
+| Uma janela bate o limite grátis | A janela Desktop pula **na hora** para um túnel livre já testado, numa faixa boa (troca instantânea); o túnel antigo troca de IP em segundo plano. Janela no terminal troca o IP do próprio túnel. O chat continua sozinho. |
 | Todos os túneis ocupados | A nova janela abre mais um túnel (até 8, opção *Máximo de túneis*); se não der, espera ~1 min e usa o WARP — nunca o IP direto da sua casa. |
 | Um túnel trava | O vigia percebe em segundos e reabre o túnel em outro servidor do Cloudflare. |
-| A troca cai numa faixa de IP "queimada" | O pool aprende: faixa cujos IPs batem o limite em segundos é recusada nas próximas trocas (veja abaixo). |
+| A troca cai numa faixa de IP "queimada" | O pool aprende: faixa cujos IPs batem o limite em segundos é recusada nas próximas trocas, e túnel livre numa faixa queimada é trocado antes de alguém pegar (veja abaixo). |
+| Ao abrir uma janela | Ela pega o túnel livre da faixa com melhor histórico (a que mais durou nas últimas 24 h). |
 | Você fecha uma janela | O túnel dela fica livre para a próxima. |
 
 **Atalhos:** `POOL.bat` (menu: ver o estado dos túneis, ligar, desligar, trocar o IP de um túnel) e `FILA.bat` (manda pedidos para rodarem sozinhos em paralelo, cada um no seu túnel: `FILA.bat "resuma o arquivo X"` e depois `FILA.bat dispatcher` dentro da pasta do projeto). Os dois ficam em `%LOCALAPPDATA%\opencode-infinite\`.
@@ -147,11 +150,13 @@ O pool cria **N túneis WARP** com **um proxy local por slot**: cada instância 
 - **App WARP:** em **modo proxy** (`warp-cli settings` → `Mode: WarpProxy`, como neste projeto) os túneis do pool saem pela rota normal e nunca passam pelo app: não há conflito. Só o **modo túnel** pode capturar o UDP do pool; com `WPOOL_ALLOW_WARP_TUNNEL=0` o `up` recusa (exit 6) enquanto o app estiver conectado em modo túnel. Medido: 5 MB a ~15 MB/s e upload de 2 MB em 0,6 s por um slot; `opencode.ai` vê o IPv6 do slot.
 - **Checagem no host da API (v2.63):** o trace do pool e o pré-voo da fila usam `https://opencode.ai/cdn-cgi/trace`, o mesmo host da API: um slot aprovado prova que o OpenCode vê o IP daquele túnel.
 - **Vigia destacado (v2.63):** o boot (`up` + `daemon`) nasce com `-Action spawn`, fora do console da janela. Fechar a janela que subiu o pool não derruba mais o vigia.
-- **Limite por IP ou por faixa? (v2.63):** cada rotação grava `pool\rotation-history.jsonl` com o `/64` do IP antigo e do novo e quanto tempo o antigo durou. `-Action stats` resume isso; se o limite voltar rápido na mesma faixa, ele sugere `WPOOL_DEDUPE_PREFIX=64` (dois túneis com o mesmo `/64` passam a contar como o mesmo IP).
-- **Famílias queimadas (v2.63.1):** medido em 26/11: IPs `2a09:bac5:…` duraram 8 a 22 min de uso, enquanto **todo** IP `2a09:bac1:…:36a8` (a faixa que o app WARP também entrega, compartilhada por muita gente) bateu o limite de novo em 10 s, e a janela ficava num loop de trocas a cada 10 s. Agora o launcher informa o motivo da troca (`-Reason quota|watcher`) e o pool guarda, por família (os primeiros 32 bits do IPv6), quantos IPs bateram o limite em menos de 2 min e quantos duraram 5 min ou mais (`poolamilies.json`). Família com 2+ quedas rápidas e nenhum sucesso nas últimas 2 h é **queimada**: a troca recusa esses IPs (até 4 reconexões trocando de endpoint, depois identidade nova), o `claim` entrega primeiro túneis de família boa e o `status` marca `(burned)`. Recusas aparecem como `exit-refused` em `recovery-events.jsonl`; `-Action stats` mostra a tabela de famílias.
-- **Família = faixa estreita (warp-pool 1.4):** os primeiros 32 bits misturavam faixas boas e ruins. Medido em 26/11 (25 trocas): dentro de `2a09:bac5` o grupo `…:243c::39c:N` caía em 8 a 89 s, enquanto `…:297d::422:N`, `…:1c8c::2d8:N` e `…:1c96::2d9:N` duravam de 5 a 35 min. Agora a família é `h1:h2:*:h4::sufixo` (ex.: `2a09:bac5:*:243c::39c`; o 3º hextet só acompanha o endpoint). A memória fica em `poolamilies-v2.json`, semeada na primeira execução a partir de `rotation-history.jsonl`. **Queimada** = 2+ quedas rápidas nas últimas `WPOOL_BURNED_TTL_HOURS` (24 h) e as duas últimas foram rápidas; uma família que funcionou de manhã e passou a queimar é recusada logo, e um IP que dura a libera de novo.
+- **Limite por IP ou por faixa? (v2.63):** cada rotação grava `pool\rotation-history.jsonl` com o `/64` do IP antigo e do novo e quanto tempo o antigo durou. `-Action stats` resume isso. Com a deduplicação por família (1.4, padrão) a dica de `WPOOL_DEDUPE_PREFIX=64` não aparece mais: a família já é mais larga que o `/64`.
+- **Famílias queimadas (v2.63.1, histórico; a regra atual é a da 1.4 abaixo):** medido em 26/11: IPs `2a09:bac5:…` duraram 8 a 22 min de uso, enquanto **todo** IP `2a09:bac1:…:36a8` (a faixa que o app WARP também entrega, compartilhada por muita gente) bateu o limite de novo em 10 s, e a janela ficava num loop de trocas a cada 10 s. Agora o launcher informa o motivo da troca (`-Reason quota|watcher`) e o pool guarda, por família (os primeiros 32 bits do IPv6), quantos IPs bateram o limite em menos de 2 min e quantos duraram 5 min ou mais (`pool\families.json`). Família com 2+ quedas rápidas e nenhum sucesso nas últimas 2 h é **queimada**: a troca recusa esses IPs (até 4 reconexões trocando de endpoint, depois identidade nova), o `claim` entrega primeiro túneis de família boa e o `status` marca `(burned)`. Recusas aparecem como `exit-refused` em `recovery-events.jsonl`; `-Action stats` mostra a tabela de famílias.
+- **Família = faixa estreita (warp-pool 1.4):** os primeiros 32 bits misturavam faixas boas e ruins. Medido em 26/11 (25 trocas): dentro de `2a09:bac5` o grupo `…:243c::39c:N` caía em 8 a 89 s, enquanto `…:297d::422:N`, `…:1c8c::2d8:N` e `…:1c96::2d9:N` duravam de 5 a 35 min. Agora a família é `h1:h2:*:h4::sufixo` (ex.: `2a09:bac5:*:243c::39c`; o 3º hextet só acompanha o endpoint). A memória fica em `pool\families-v2.json`, semeada na primeira execução a partir de `rotation-history.jsonl`. **Queimada** = 2+ quedas rápidas nas últimas `WPOOL_BURNED_TTL_HOURS` (24 h) e as duas últimas foram rápidas; uma família que funcionou de manhã e passou a queimar é recusada logo, e um IP que dura a libera de novo.
 - **Túnel livre em família queimada é trocado (1.4):** no `up` e a cada ciclo do vigia, um slot sem dono numa família queimada gira para uma família boa (evento `burned-replace`). Em 27/11, depois de religar o PC, os 4 túneis voltaram em famílias queimadas.
 - **4 túneis = 4 famílias (1.4):** com `WPOOL_FAMILY_DEDUPE=1` (padrão), dois slots livres na mesma família contam como repetidos e o de cima gira (evento `family-collision`). Slot em uso nunca é girado por isso. Trocas automáticas têm pausa de 10 min por slot, para não registrar identidades em loop quando não há família livre.
+- **Troca instantânea (1.5):** quando o limite volta (`-Reason quota|watcher`), a janela Desktop passa `-Swap -Instance` no `rotate`. Se houver um slot **livre**, `up`, numa família boa e diferente da que queimou, o claim muda para ele na hora (nova porta; o launcher reinicia o serviço com o proxy novo). O slot antigo fica livre com o IP em `burned[]`, vai para o fim da fila do `claim` e o vigia o gira em segundo plano. Sem reserva boa, cai na troca normal. Eventos: `swap` em `recovery-events.jsonl` e linha com `"swap": N` em `rotation-history.jsonl`. Janela no terminal não usa (o servidor `--standalone` nasceu com a porta antiga). Desligar: `WPOOL_FAST_SWAP=0`.
+- **Melhor família primeiro (1.5):** cada família tem uma nota nas últimas 24 h (+1 por IP que durou, −1 por queda rápida, o resultado mais recente conta em dobro). O `claim` e a troca instantânea escolhem a maior nota; família desconhecida vale 0.
 - **Limpeza (v2.63):** túneis acima da quantidade configurada são parados e apagados no `up`, a menos que uma janela viva ainda os use. A primeira subida mostra o progresso (`pool\up-progress.json`).
 - **Limitação:** destino IPv4-only sai pelo IPv4 compartilhado (CGNAT); IP próprio por instância exige IPv6 no destino (`opencode.ai` tem AAAA).
 
@@ -224,8 +229,9 @@ Se algo falhar, olhe `recovery-events.jsonl`, `pool\pool-status.json` e `instanc
 
 | Quero... | Faço |
 |---|---|
-| Abrir normalmente | `INICIAR.bat` → **2 - 1 - 1** |
-| Abrir com IP próprio, em paralelo (pool) | `INICIAR.bat` → **2 - 5 - 1**, uma vez por janela |
+| Abrir normalmente (pool ligado) | `INICIAR.bat` → **2 - 5 - 1**; para outra conversa em paralelo, repita |
+| Abrir sem o pool (WARP simples) | `INICIAR.bat` → **2 - 1 - 1** |
+| Ver famílias de IP boas e queimadas | `POOL.bat` → stats (ou `warp-pool.ps1 -Action stats`) |
 | Ver os túneis e os IPs | `POOL.bat` → **1** |
 | Rodar pedidos sozinhos em paralelo | `FILA.bat "pedido"` e `FILA.bat dispatcher` |
 | Abrir num projeto específico | arraste a pasta do projeto em cima do `INICIAR.bat` |
@@ -233,7 +239,7 @@ Se algo falhar, olhe `recovery-events.jsonl`, `pool\pool-status.json` e `instanc
 | Trocar o IP na mão | *Iniciar o OpenCode* → *Trocar IP (teste)* |
 | Mudar a mensagem de retomada, o modelo etc. | menu → **5. Definições** |
 
-**Quando o limite grátis chega:** o launcher detecta a mensagem, pega um IP novo no WARP, confere que o IP mudou e envia a mensagem de retomada no **mesmo chat** que parou. Você não precisa fazer nada.
+**Quando o limite grátis chega:** o launcher detecta a mensagem, pega um IP novo (no pool: troca instantânea para um túnel reserva, ou troca do próprio túnel), confere que o IP mudou e envia a mensagem de retomada no **mesmo chat** que parou. Você não precisa fazer nada.
 
 ---
 
@@ -243,6 +249,9 @@ Se algo falhar, olhe `recovery-events.jsonl`, `pool\pool-status.json` e `instanc
 |---|---|---|
 | Conexão | `WARP` (`WIREGUARD` para o pool) | Definições → Ligação → Método de ligação |
 | Pool de túneis | desligado, 4 túneis, máximo 8 | Definições → Pool de túneis |
+| Um túnel por família de IP | ligado (`WPOOL_FAMILY_DEDUPE=1`) | Definições → Pool de túneis |
+| Troca instantânea no limite | ligada (`WPOOL_FAST_SWAP=1`, só janela Desktop) | Definições → Pool de túneis |
+| Memória de faixa queimada | 24 h (`WPOOL_BURNED_TTL_HOURS`) | `config.json` |
 | Modelo da retomada | `opencode/deepseek-v4.1-flash-free#max` | Definições → Sessão → Modelo de retoma |
 | Mensagem de retomada | `voltamos, pode continuar e retomar de onde parou` | Definições → Sessão |
 | Ação no limite | `rotate` (troca o IP e continua) | Definições → Troca de IP |
@@ -291,7 +300,7 @@ Depois é só abrir o `INICIAR.bat`: ele percebe que os arquivos da pasta mudara
 ```text
 openinfinite-code/
 ├── INSTALAR.bat            instala / atualiza tudo
-├── INICIAR.bat             abre o launcher (caminho 2-1-1)
+├── INICIAR.bat             abre o launcher (caminho 2-5-1 com o pool, 2-1-1 sem)
 ├── POOL.bat                menu do pool de túneis
 ├── FILA.bat                fila de pedidos em paralelo
 ├── launcher/
@@ -312,6 +321,11 @@ openinfinite-code/
 ---
 
 ## 🗒️ Versões
+
+### warp-pool.ps1 1.5
+- **Troca instantânea:** no limite, a janela Desktop pula na hora para um túnel livre já verificado numa família boa; o túnel antigo gira em segundo plano. `WPOOL_FAST_SWAP=0` desliga.
+- **Melhor família primeiro:** `claim` e troca instantânea escolhem a família com melhor histórico; túnel livre com o IP no próprio `burned[]` vai para o fim da fila.
+- Duas opções novas no menu Definições → Pool de túneis: *One tunnel per IP family* e *Instant swap on limit*.
 
 ### warp-pool.ps1 1.4
 - Família de IP estreita (`h1:h2:*:h4::sufixo`), túnel livre em família queimada é trocado no `up` e pelo vigia, e os túneis livres ficam em famílias diferentes. `WPOOL_FAMILY_DEDUPE=0` volta ao comportamento antigo de dedupe.

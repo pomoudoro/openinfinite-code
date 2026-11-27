@@ -3,8 +3,8 @@ setlocal
 REM OpenInfinite Code - iniciar
 REM   duplo clique                    -> menu do launcher
 REM   arrastar uma pasta para ca      -> abre nessa pasta
-REM Caminho recomendado no menu: 2 - 1 - 1
-REM   [2] Launch OpenCode  ->  [1] WARP  ->  [1] New IP and start OpenCode
+REM Caminho recomendado no menu: 2 - 5 - 1 (pool de tuneis; sem o pool: 2 - 1 - 1)
+REM   [2] Launch OpenCode  ->  [5] WIREGUARD  ->  [1] New IP and start OpenCode
 set "APPDIR=%LOCALAPPDATA%\opencode-infinite\app"
 set "APPBAT=%APPDIR%\OpenCode Infinite.bat"
 set "SRC=%~dp0launcher"
