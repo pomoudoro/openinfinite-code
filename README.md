@@ -238,9 +238,9 @@ Se algo falhar, olhe `recovery-events.jsonl`, `pool\pool-status.json` e `instanc
 |---|---|
 | Abrir normalmente (pool ligado) | `INICIAR-POOL.bat`, ou `INICIAR.bat` → **2 - 5 - 1**; para outra conversa em paralelo, repita |
 | Abrir sem o pool (WARP simples) | `INICIAR.bat` → **2 - 1 - 1** |
-| Ver famílias de IP boas e queimadas | `POOL.bat` → **8** (stats) |
+| Ver famílias de IP boas e queimadas | `POOL.bat` → **8** (stats): primeiro os túneis de agora com família, nota e se está queimada; depois o histórico por faixa e por família |
 | Arrumar a pasta de estado | `POOL.bat` → **L**: arquiva cópias antigas em `backup\estado-antigo` e mostra o que ocupa espaço. Não apaga nada |
-| Acompanhar o pool numa página | `POOL.bat` → **9** (painel): túneis, famílias, últimas trocas e eventos; recarrega sozinha a cada 30 s |
+| Acompanhar o pool numa página | `POOL.bat` → **9** (painel): gráfico de quanto cada IP durou, duração mediana por família, túneis, famílias, últimas trocas e eventos; recarrega sozinha a cada 30 s |
 | Ver os túneis e os IPs | `POOL.bat` → **1** |
 | Rodar pedidos sozinhos em paralelo | `FILA.bat "pedido"` e `FILA.bat dispatcher` |
 | Abrir num projeto específico | arraste a pasta do projeto em cima do `INICIAR.bat` |
@@ -280,7 +280,7 @@ cd openinfinite-code
 git pull
 ```
 
-Depois é só abrir o `INICIAR.bat`: ele percebe que os arquivos da pasta mudaram e atualiza a cópia instalada. Para reaplicar os padrões, rode o `INSTALAR.bat` de novo.
+Depois é só abrir o `INICIAR.bat`: ele percebe que os arquivos da pasta mudaram e atualiza a cópia instalada (inclusive as traduções em `lang\`). Para reaplicar os padrões, rode o `INSTALAR.bat` de novo.
 
 ---
 
@@ -334,8 +334,14 @@ openinfinite-code/
 
 ## 🗒️ Versões
 
+### warp-pool.ps1 1.8
+- **Gráficos no painel:** cada troca dos últimos 7 dias (quanto o IP antigo durou; vermelho = limite em menos de 2 min, verde = 5 min ou mais, quadrado = troca instantânea) e a duração mediana por família. SVG dentro da página, sem biblioteca, segue o tema claro/escuro.
+- **`stats`** começa pela tabela dos túneis de agora com família, nota e queimada.
+- **Traduções:** as opções novas do pool e o aviso do `--pool` em português (`langs\pt.json`); o `INICIAR.bat` passa a copiar as traduções para a instalação (antes só o `INSTALAR.bat` copiava).
+- `warp-pool.ps1` só com ASCII (o PowerShell 5.1 lê `.ps1` sem BOM como ANSI e quebrava os acentos); um teste garante isso. 72 verificações no total.
+
 ### warp-pool.ps1 1.7
-- **Testes automáticos** (`tests\run-tests.ps1`, 65 verificações, sem dependências) e **GitHub Actions**.
+- **Testes automáticos** (`tests\run-tests.ps1`, sem dependências) e **GitHub Actions**.
 - **Logs com limite** (`recovery-events.jsonl` 2 MB, `rotation-history.jsonl` 1 MB; o excesso vai para `.1`).
 - **`-Action tidy`** / `POOL.bat` → **L**: arquiva cópias antigas da pasta de estado; `-Prune` apaga cópias antigas do banco de chats e `.bak` velhos.
 - Correção: trocas automáticas não mexem mais em slot com claim `lease`.

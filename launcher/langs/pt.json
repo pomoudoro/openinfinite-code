@@ -1039,5 +1039,10 @@
   "  [pool] preparing the tunnels (the first time can take up to 2 minutes)...": "  [pool] preparando os túneis (na primeira vez pode levar até 2 minutos)...",
   "WireGuard through wireproxy, a local proxy that only opencode uses. With the tunnel pool on, each window takes its own WARP tunnel and IP; otherwise your .conf files are used one after the other. No administrator prompt.": "WireGuard pelo wireproxy, um proxy local usado só pelo opencode. Com o pool de túneis ligado, cada janela pega um túnel WARP e um IP próprios; sem o pool, usa os seus arquivos .conf, um depois do outro. Sem pedido de administrador.",
   "Session": "Sessão",
-  "IP rotation": "Troca de IP"
+  "IP rotation": "Troca de IP",
+  "One tunnel per IP family": "Um túnel por família de IP",
+  "On: two free tunnels in the same IP family (for example 2a09:bac5:*:243c::39c) count as a repeat and one of them changes IP, so 4 tunnels are 4 different ranges. A tunnel in use is never changed for this.": "Ativado: dois túneis livres na mesma família de IP (por exemplo 2a09:bac5:*:243c::39c) contam como repetidos e um deles troca de IP, para 4 túneis serem 4 faixas diferentes. Um túnel em uso nunca é trocado por isso.",
+  "Instant swap on limit": "Troca instantânea no limite",
+  "On: when the free limit comes back, a Desktop window moves at once to a free tunnel that is already up in a working family, instead of waiting 10-60 s for its own tunnel to change IP. The old tunnel changes IP in the background.": "Ativado: quando o limite grátis volta, a janela Desktop passa na hora para um túnel livre já ligado numa família boa, em vez de esperar 10 a 60 s o próprio túnel trocar de IP. O túnel antigo troca de IP em segundo plano.",
+  "%C_WARN%  [pool] The tunnel pool is off. Turn it on in Settings - Egress pool - Use the egress pool, or open the normal INICIAR.bat. - code 2%C_RST%": "%C_WARN%  [pool] O pool de túneis está desligado. Ligue em Definições - Pool de túneis - Usar o pool de túneis, ou abra pelo INICIAR.bat normal. - código 2%C_RST%"
 }
