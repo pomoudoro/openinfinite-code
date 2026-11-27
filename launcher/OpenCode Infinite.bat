@@ -3633,7 +3633,12 @@ exit /b 1
 call :vpn_pool_read
 if errorlevel 1 goto :vpn_run_nopool
 REM v2.63.1: WHY (quota/watcher = the free limit came back) lets the pool learn which exit families burn at once.
-"%PSX%" -NoProfile -Command "& '%OC_POOL_STATE%\warp-pool.ps1' rotate -Slot %OC_POOL_SLOT% -State '%OC_POOL_STATE%' -Reason '%WHY%'" >nul 2>&1
+REM warp-pool 1.5: a Desktop window passes -Swap: on a limit its claim moves at once to a free slot that is
+REM already up in a working family (new port); :vpn_r_ok then restarts the shared service with that proxy.
+REM A CLI window keeps rotating in place: its --standalone server was born with the old port.
+set "OC_WPSWAP="
+if /i "%APP_MODE%"=="DESKTOP" set "OC_WPSWAP= -Swap -Instance '%OC_SID%'"
+"%PSX%" -NoProfile -Command "& '%OC_POOL_STATE%\warp-pool.ps1' rotate -Slot %OC_POOL_SLOT% -State '%OC_POOL_STATE%' -Reason '%WHY%'%OC_WPSWAP%" >nul 2>&1
 if not errorlevel 1 goto :vpn_run_pool_reread
 REM v2.62.1: no new IP this time (exit 2) still leaves this window's slot serving; only a slot
 REM that fails verify is given back and the old path runs. v2.62.0 dropped to the old path on any
@@ -7890,6 +7895,8 @@ $Schema = @(
   S 'WPOOL_ALLOW_WARP_TUNNEL' 'Egress pool' 'Pool inside WARP client' 'bool' 1 'On: the pool also starts while the WARP app is connected in tunnel mode. Proxy mode never conflicts with the pool. Off: the pool waits for the WARP app to leave tunnel mode.' 'next launch'
   S 'WPOOL_MAX' 'Egress pool' 'Most tunnels' 'int' 8 'When every tunnel is taken, a new window adds one more, up to this number. Each tunnel uses about 65 MB.' 'now' 1 16
   S 'WPOOL_DEDUPE_PREFIX' 'Egress pool' 'Compare IPs by range' 'enum' '0' '0 = two tunnels only clash on the same IP. 64 = they also clash when the IPv6 shares the first 64 bits. Use 64 if warp-pool.ps1 -Action stats says the limit follows the range.' 'now' 0 0 @('0', '64')
+  S 'WPOOL_FAMILY_DEDUPE' 'Egress pool' 'One tunnel per IP family' 'bool' 1 'On: two free tunnels in the same IP family (for example 2a09:bac5:*:243c::39c) count as a repeat and one of them changes IP, so 4 tunnels are 4 different ranges. A tunnel in use is never changed for this.' 'now'
+  S 'WPOOL_FAST_SWAP' 'Egress pool' 'Instant swap on limit' 'bool' 1 'On: when the free limit comes back, a Desktop window moves at once to a free tunnel that is already up in a working family, instead of waiting 10-60 s for its own tunnel to change IP. The old tunnel changes IP in the background.' 'now'
   S 'PROXY_LIST_URL' 'Proxy list' 'Proxy list source' 'listsrc' 'https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=protocolipport&format=text' 'URL or local file, any format (plain, CSV, JSON, XML, HTML).' 'now'
   S 'PROXY_LIST_MIN_BYTES' 'Proxy list' 'Minimum list size (bytes)' 'int' 20 'A downloaded list smaller than this is rejected. 0 = off.' 'now' 0 100000000
   S 'PROXY_TRY_MAX' 'Proxy list' 'Proxies tried per pick' 'int' 40 'How many untried proxies to test before giving up. Tested ones are skipped until the whole list was used.' 'now' 1 500
