@@ -56,7 +56,7 @@ $PeerEndpoint = '162.159.192.1:2408'
 # answered on all of these; 162.159.193.1:2408 did not. A rebuilt slot moves to the next one, so
 # an endpoint that stopped answering the slot's handshakes is not retried in a loop.
 $PeerEndpoints = @('162.159.192.1:2408', '188.114.97.1:2408', '162.159.195.1:2408', '162.159.192.1:4500', '188.114.96.1:500')
-$ScriptVersion = '1.8'
+$ScriptVersion = '1.9'
 
 $SelfPath = $MyInvocation.MyCommand.Path
 $State = [IO.Path]::GetFullPath($State)
@@ -90,7 +90,7 @@ if (-not $PSBoundParameters.ContainsKey('PortBase')) { $PortBase = [int](CfgVal 
 if (-not $PSBoundParameters.ContainsKey('DedupeTries')) { $DedupeTries = [int](CfgVal 'WPOOL_DEDUPE_TRIES' 3) }
 if (-not $PSBoundParameters.ContainsKey('HealthSec')) { $HealthSec = [int](CfgVal 'WPOOL_HEALTH_SEC' 30) }
 if (-not $PSBoundParameters.ContainsKey('LeaseMin')) { $LeaseMin = [int](CfgVal 'WPOOL_LEASE_MIN' 15) }
-if (-not $PSBoundParameters.ContainsKey('BurnedTtlHours')) { $BurnedTtlHours = [int](CfgVal 'WPOOL_BURNED_TTL_HOURS' 24) }
+if (-not $PSBoundParameters.ContainsKey('BurnedTtlHours')) { $BurnedTtlHours = [int](CfgVal 'WPOOL_BURNED_TTL_HOURS' 72) }
 if (-not $PSBoundParameters.ContainsKey('WgDir')) { $WgDir = [string](CfgVal 'WPOOL_WG_DIR' '') }
 $RotateMode = [string](CfgVal 'WPOOL_ROTATE_MODE' 'reconnect')
 $VerifyProbe = [int](CfgVal 'WPOOL_VERIFY_PROBE' 0)
@@ -1718,7 +1718,12 @@ function Invoke-Daemon {
     $bytes = [Text.Encoding]::UTF8.GetBytes(([string]$PID + '|' + [string]$ticks))
     $lock.Write($bytes, 0, $bytes.Length)
     $lock.Flush()
-    Write-Event 'daemon-start' @{ pid = $PID; healthSec = $HealthSec }
+    Write-Event 'daemon-start' @{ pid = $PID; healthSec = $HealthSec; version = $ScriptVersion }
+    # v1.9: INICIAR.bat copies a new warp-pool.ps1 over this one; a daemon started earlier kept the old
+    # code until a reboot (27/11: the 1.3 daemon never replaced the burned slots). It now notices and
+    # starts the new one after releasing its lock.
+    $selfStamp = $null
+    try { $selfStamp = (Get-Item -LiteralPath $SelfPath).LastWriteTimeUtc } catch { }
     $interval = [Math]::Max(5, $HealthSec)
     $fails = @{}
     while (-not (Test-Path -LiteralPath $stopFlag)) {
@@ -1810,10 +1815,21 @@ function Invoke-Daemon {
       Limit-PoolLogs
       $end = (Get-Date).AddSeconds($interval)
       while ((Get-Date) -lt $end -and -not (Test-Path -LiteralPath $stopFlag)) { Start-Sleep -Seconds 1 }
+      if ($selfStamp) {
+        $nowStamp = $null
+        try { $nowStamp = (Get-Item -LiteralPath $SelfPath).LastWriteTimeUtc } catch { }
+        if ($nowStamp -and $nowStamp -ne $selfStamp) { $script:daemonReload = $true; Write-Event 'daemon-reload' @{ pid = $PID; from = $ScriptVersion }; break }
+      }
     }
     Write-Event 'daemon-stop' @{ pid = $PID }
     return 0
-  } finally { if ($lock) { try { $lock.Dispose() } catch { } } }
+  } finally {
+    if ($lock) { try { $lock.Dispose() } catch { } }
+    if ($script:daemonReload) {
+      # The lock is free now: the new copy of the script takes over as the daemon.
+      try { Ensure-Detached; $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'; $null = [OpenInfinite.Detached]::Start($ps, ('-NoProfile -ExecutionPolicy Bypass -File "' + $SelfPath + '" -Action daemon -State "' + $State + '" -HealthSec ' + $HealthSec), $State) } catch { Write-Event 'daemon-reload-failed' @{ error = $_.Exception.Message } }
+    }
+  }
 }
 function Invoke-Reap {
   Ensure-Dirs

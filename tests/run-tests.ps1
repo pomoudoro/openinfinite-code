@@ -261,6 +261,10 @@ $mb = Get-ModelBody 'opencode/deepseek-v4.1-flash-free#max' | ConvertFrom-Json
 Check 'corpo do modelo aninhado em "model"' ($mb.model.id -eq 'deepseek-v4.1-flash-free' -and $mb.model.providerID -eq 'opencode' -and $mb.model.variant -eq 'max')
 Check 'modelo sem variante' (((Get-ModelBody 'opencode/x') | ConvertFrom-Json).model.PSObject.Properties['variant'] -eq $null)
 Check 'modelo invalido = sem troca' ((Get-ModelBody 'semprovedor') -eq '')
+$dp0 = @([IO.File]::ReadAllLines($bat) | Where-Object { $_ -like '*%~dp0*' -and $_ -notmatch '^\s*REM ' -and $_ -notlike 'set "OCI_DIR=%~dp0"' })
+Check 'launcher nao usa %~dp0 depois do shift (usa OCI_DIR)' ($dp0.Count -eq 0) ($dp0 -join ' | ')
+Check 'memoria de faixa queimada: 72 h no launcher e no pool' (($launcherText -match 'set "WPOOL_BURNED_TTL_HOURS=72"') -and ([IO.File]::ReadAllText($poolScript) -match "WPOOL_BURNED_TTL_HOURS' 72"))
+Check 'vigia recarrega quando o warp-pool.ps1 muda' ([IO.File]::ReadAllText($poolScript) -match 'daemon-reload')
 Check 'launcher liga o oculto no terminal so com sessao e --standalone' ($launcherText -match 'if "%RESUME_HIDDEN%"=="1" if defined CAP_STANDALONE if /i not "%RESUME_MODE%"=="last" if /i not "%RESUME_MODE%"=="custom" if defined RT_SESS set "OC_RESUME_HIDDEN=1"')
 
 # resume-target.py check: a hidden resume waiting in session_inbox, or already a synthetic message,

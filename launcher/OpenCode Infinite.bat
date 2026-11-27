@@ -284,7 +284,9 @@ set "WPOOL_PORT_BASE=42000"
 set "WPOOL_DEDUPE_TRIES=3"
 set "WPOOL_HEALTH_SEC=30"
 set "WPOOL_LEASE_MIN=15"
-set "WPOOL_BURNED_TTL_HOURS=24"
+REM openinfinite-code: 72 h (was 24). Measured 27/11: 2a09:bac1:*:36a8::39c burned on 26/11 08:50, the 24 h memory
+REM expired at 08:50 and the instant swap of 09:50 went straight back into that range.
+set "WPOOL_BURNED_TTL_HOURS=72"
 set "WPOOL_ROTATE_MODE=reconnect"
 set "WPOOL_VERIFY_PROBE=0"
 set "WPOOL_WG_DIR="
@@ -393,6 +395,10 @@ if exist "%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" set "PSX=
 REM This file's own path: the folder picker reads its embedded PowerShell
 REM block from here, so the picker never needs a helper file on disk.
 set "OCI_SELF=%~f0"
+REM openinfinite-code: the launcher folder, taken before the argument parsing. A plain "shift" there
+REM also shifts %0, so after --pool/--warp %~dp0 pointed at the current folder and desktop-resume.ps1
+REM was "not found" (the Desktop resume fell back to the CLI).
+set "OCI_DIR=%~dp0"
 REM EGRESS mode: WARP | TOR | PROXY | NONE (set by the menu after the folder)
 set "EGRESS=WARP"
 REM ACTIVE_PROXY holds the exact URL handed to opencode (process-only).
@@ -950,7 +956,7 @@ call :numcfg WPOOL_PORT_BASE 42000 65535
 call :numcfg WPOOL_DEDUPE_TRIES 3
 call :numcfg WPOOL_HEALTH_SEC 30 600
 call :numcfg WPOOL_LEASE_MIN 15 1440
-call :numcfg WPOOL_BURNED_TTL_HOURS 24
+call :numcfg WPOOL_BURNED_TTL_HOURS 72
 call :numcfg0 WPOOL_VERIFY_PROBE 0
 call :numcfg0 WPOOL_ALLOW_WARP_TUNNEL 1 1
 call :numcfg0 RESUME_HIDDEN 1 1
@@ -4044,7 +4050,7 @@ set "RAPI_DIR="
 set "RAPI_SOURCE="
 set "RAPI_MSGID="
 call :log "resume: via the Desktop service, async ip=%IP% egress=%EGRESS%" resume
-"%PSX%" -NoProfile -ExecutionPolicy Bypass -File "%~dp0desktop-resume.ps1" -Mode send -SinceMinutes 20 -ResultFile "%OC_RRES%"
+"%PSX%" -NoProfile -ExecutionPolicy Bypass -File "%OCI_DIR%desktop-resume.ps1" -Mode send -SinceMinutes 20 -ResultFile "%OC_RRES%"
 set "RAPI=%errorlevel%"
 call :restore_env
 if exist "%OC_RRES%" for /f "usebackq tokens=1* delims==" %%a in ("%OC_RRES%") do set "%%a=%%b"
@@ -4086,7 +4092,7 @@ set "RT_DIR="
 set "RT_SRC="
 set "OC_DATA_DIR=%DATA_DIR%"
 set "OC_RTF=%STATE_DIR%\resume_target.txt"
-set "OC_RTPY=%~dp0resume-target.py"
+set "OC_RTPY=%OCI_DIR%resume-target.py"
 if exist "%OC_RTF%" del /f /q "%OC_RTF%" >nul 2>&1
 "%PSX%" -NoProfile -Command "try{ $py=(Get-Command python -ErrorAction Stop).Source; $s=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()-1200000; $j=(& $py -I $env:OC_RTPY target --since-ms $s | Select-Object -Last 1) | ConvertFrom-Json; if($j.session){ [IO.File]::WriteAllLines($env:OC_RTF,[string[]]@(('RT_SESS='+$j.session),('RT_DIR='+($j.directory -replace '/','\')),('RT_SRC='+$j.source)),(New-Object Text.UTF8Encoding($false))) } }catch{}" >nul 2>&1
 if exist "%OC_RTF%" for /f "usebackq tokens=1* delims==" %%a in ("%OC_RTF%") do set "%%a=%%b"
@@ -4347,7 +4353,7 @@ set "OC_LOGF=%LOGFILE%"
 call :log "resume start: executable=%OC_EXE% model=%OC_MODEL% timeout=%OC_TO%s idle=%OC_IDLE%s args=%OC_FL%" resume
 if exist "%OC_OUTF%" del /f /q "%OC_OUTF%" >nul 2>&1
 if exist "%OC_ERRF%" del /f /q "%OC_ERRF%" >nul 2>&1
-set "OC_RUNNER=%~dp0resume-runner.ps1"
+set "OC_RUNNER=%OCI_DIR%resume-runner.ps1"
 if not exist "%OC_RUNNER%" (
     >"%STATE_DIR%\resume.err" echo resume-runner.ps1 not found next to the launcher.
     call :log "resume aborted: resume-runner.ps1 missing" resume
@@ -6396,7 +6402,7 @@ call :numcfg WPOOL_PORT_BASE 42000 65535
 call :numcfg WPOOL_DEDUPE_TRIES 3
 call :numcfg WPOOL_HEALTH_SEC 30 600
 call :numcfg WPOOL_LEASE_MIN 15 1440
-call :numcfg WPOOL_BURNED_TTL_HOURS 24
+call :numcfg WPOOL_BURNED_TTL_HOURS 72
 call :numcfg0 WPOOL_VERIFY_PROBE 0
 call :numcfg0 WPOOL_ALLOW_WARP_TUNNEL 1 1
 call :numcfg0 RESUME_HIDDEN 1 1
