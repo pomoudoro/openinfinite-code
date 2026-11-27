@@ -56,7 +56,7 @@ $PeerEndpoint = '162.159.192.1:2408'
 # answered on all of these; 162.159.193.1:2408 did not. A rebuilt slot moves to the next one, so
 # an endpoint that stopped answering the slot's handshakes is not retried in a loop.
 $PeerEndpoints = @('162.159.192.1:2408', '188.114.97.1:2408', '162.159.195.1:2408', '162.159.192.1:4500', '188.114.96.1:500')
-$ScriptVersion = '1.9'
+$ScriptVersion = '1.9.1'
 
 $SelfPath = $MyInvocation.MyCommand.Path
 $State = [IO.Path]::GetFullPath($State)
@@ -1793,11 +1793,16 @@ function Invoke-Daemon {
           }
           Write-Event 'daemon-restart' @{ slot = $n; reason = $m.reason; fails = [int]$fails[$n] }
           # Rebuilt on the next WARP endpoint: the stalled one is not answering this identity.
-          $r = Start-Slot $n -WaitSec 30 -NextEndpoint
+          # v1.9.1: a rebuild avoids burned families too (27/11 09:57: a rebuilt free slot came back on
+          # 36a8::39c). If only a burned exit answers, the slot still comes back (a stale exit beats a
+          # dead port) and Invoke-ReplaceBurned moves it later.
+          $r = Start-Slot $n -WaitSec 30 -NextEndpoint -AvoidBadFamily
+          if (-not $r.ok -and $r.reason -eq 'burned family') { $r = Start-Slot $n -WaitSec 30 -NextEndpoint }
           # The same identity keeps failing: a fresh wgcf device (a manual .conf in WgDir still wins).
           if (-not $r.ok -and ($fails[$n] % 4) -eq 0) {
             Write-Event 'daemon-new-identity' @{ slot = $n; reason = $r.reason }
-            $r = Start-Slot $n -NewIdentity -NextEndpoint -WaitSec 30
+            $r = Start-Slot $n -NewIdentity -NextEndpoint -WaitSec 30 -AvoidBadFamily
+            if (-not $r.ok -and $r.reason -eq 'burned family') { $r = Start-Slot $n -NewIdentity -NextEndpoint -WaitSec 30 }
           }
           if ($r.ok) { $fails[$n] = 0; Refresh-ClaimIp $n }
           else { Write-Event 'daemon-restart-failed' @{ slot = $n; reason = $r.reason } }
